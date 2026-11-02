@@ -3,9 +3,44 @@
 # Install paim for the current user.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+VENV="$ROOT/.venv"
+PY="$VENV/bin/python"
 BIN="$HOME/.local/bin"
 APPS="$HOME/.local/share/applications"
 ICONS="$HOME/.local/share/icons/hicolor/256x256/apps"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  printf '%s\n' "paim: python3 was not found; install Python 3 first." >&2
+  exit 1
+fi
+
+# Keep the Python dependencies inside the project venv instead of installing
+# PyGObject, pycairo and Pillow into the system Python.  The default index is
+# the Aliyun mirror; override it with PAIM_PIP_INDEX_URL (or PIP_INDEX_URL)
+# if you prefer another mirror or the official PyPI.
+if [ -n "${PAIM_PIP_INDEX_URL:-}" ]; then
+  PIP_INDEX_URL=$PAIM_PIP_INDEX_URL
+  export PIP_INDEX_URL
+elif [ -z "${PIP_INDEX_URL:-}" ]; then
+  PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+  export PIP_INDEX_URL
+fi
+
+if [ ! -x "$PY" ]; then
+  printf '%s\n' "Creating virtual environment in $VENV"
+  python3 -m venv "$VENV"
+fi
+
+printf '%s\n' "Installing Python dependencies from $PIP_INDEX_URL"
+printf '%s\n' "(the first run may compile PyGObject and take a few minutes)"
+"$PY" -m pip install --disable-pip-version-check --no-input -r "$ROOT/requirements.txt"
+
+if ! "$PY" -c 'import gi, cairo, PIL' >/dev/null 2>&1; then
+  printf '%s\n' "paim: dependencies were installed, but importing gi/cairo/PIL failed." >&2
+  printf '%s\n' "Make sure the GTK4 runtime and gobject-introspection are installed." >&2
+  exit 1
+fi
+
 mkdir -p "$BIN" "$APPS" "$ICONS"
 ln -sf "$ROOT/paim" "$BIN/paim"
 install -m 644 "$ROOT/assets/paim.png" "$ICONS/paim.png"

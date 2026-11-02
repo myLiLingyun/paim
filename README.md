@@ -14,10 +14,10 @@
 
 ## 运行
 
-系统需要 GTK4、PyGObject、Cairo、Pillow。Arch Linux 上安装：
+Python 依赖（PyGObject、pycairo、Pillow）安装在项目目录下的 `.venv` 虚拟环境中，不会写入系统 Python。系统只需要 GTK4 运行库，以及编译 PyGObject 所需的工具和头文件。Arch Linux 上安装：
 
 ```bash
-sudo pacman -S gtk4 python-gobject python-cairo python-pillow
+sudo pacman -S --needed gtk4 base-devel gobject-introspection
 ```
 
 克隆并安装：
@@ -28,7 +28,16 @@ cd paim
 ./install.sh
 ```
 
-安装脚本会把启动器链接到 `~/.local/bin/paim`，并安装图标和桌面入口；安装出来的桌面入口会写入绝对 `Exec` 路径，因此不依赖图形会话的 `PATH`。
+`install.sh` 会：
+
+- 在项目目录创建 `.venv`（已存在则复用），并安装 `requirements.txt` 中的依赖；PyGObject 需要从源码编译，首次安装可能需要几分钟；
+- 把启动器链接到 `~/.local/bin/paim`，并安装图标和桌面入口；安装出来的桌面入口会写入绝对 `Exec` 路径，因此不依赖图形会话的 `PATH`。
+
+pip 默认使用阿里云 PyPI 镜像。如需换源，安装时设置 `PAIM_PIP_INDEX_URL`（或 `PIP_INDEX_URL`），例如：
+
+```bash
+PAIM_PIP_INDEX_URL=https://pypi.org/simple ./install.sh
+```
 
 如果希望在终端里直接运行，可把 `~/.local/bin` 加入 `PATH`，然后执行：
 
@@ -40,13 +49,17 @@ paim
 
 主题和快速访问工具栏配置保存在 `~/.config/paim/settings.json`。
 
-也可以不安装，直接从项目目录运行：
+也可以不安装，只创建虚拟环境后从项目目录运行：
 
 ```bash
+python3 -m venv .venv
+PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple .venv/bin/pip install -r requirements.txt
 ./paim
 # 或
-python3 -m mspaint
+.venv/bin/python -m mspaint
 ```
+
+`.venv` 已被 `.gitignore` 忽略；删除它即可彻底移除这些依赖。
 
 ## 功能
 
@@ -93,14 +106,17 @@ python3 -m mspaint
 ## 测试
 
 ```bash
-python3 tools/test_core.py
-xvfb-run -a python3 tools/test_interactions.py
-xvfb-run -a python3 tools/test_dialogs.py
-xvfb-run -a python3 tools/smoke_test.py
-xvfb-run -a python3 tools/test_drop.py
-xvfb-run -a env XDG_CONFIG_HOME=$(mktemp -d) python3 tools/test_features.py
-xvfb-run -a python3 tools/test_i18n.py
-xvfb-run -a python3 tools/test_transparency.py
+# 使用项目虚拟环境（或直接写 .venv/bin/python）
+source .venv/bin/activate
+
+python tools/test_core.py
+xvfb-run -a python tools/test_interactions.py
+xvfb-run -a python tools/test_dialogs.py
+xvfb-run -a python tools/smoke_test.py
+xvfb-run -a python tools/test_drop.py
+xvfb-run -a env XDG_CONFIG_HOME=$(mktemp -d) python tools/test_features.py
+xvfb-run -a python tools/test_i18n.py
+xvfb-run -a python tools/test_transparency.py
 ```
 
 ## 代码结构

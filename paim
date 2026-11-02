@@ -4,4 +4,11 @@
 SELF=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
 DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd) || exit 1
 cd "$DIR" || exit 1
-exec python3 -m mspaint "$@"
+if [ -x "$DIR/.venv/bin/python" ]; then
+  exec "$DIR/.venv/bin/python" -m mspaint "$@"
+fi
+printf '%s\n' "paim: virtual environment not found in $DIR/.venv" >&2
+printf '%s\n' "Run ./install.sh first, or create it manually:" >&2
+printf '%s\n' "  python3 -m venv .venv" >&2
+printf '%s\n' "  .venv/bin/pip install -r requirements.txt" >&2
+exit 1
