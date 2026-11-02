@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=paim
+GenericName=Paint
+Comment=paintImproved — a lightweight GTK4 drawing application
+Exec=paim %F
+Icon=paim
+Terminal=false
+Categories=Graphics;2DGraphics;
+MimeType=image/png;image/jpeg;image/bmp;image/gif;image/webp;image/tiff;
+StartupNotify=true
+StartupWMClass=io.github.paim.PaintImproved

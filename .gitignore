@@ -1,0 +1,25 @@
+# Runtime / development
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+*.tmp
+.DS_Store
+.idea/
+.vscode/
+
+# Local reference material and reverse-engineering workspace
+reference/
+win/
+tools/winssh
+tools/winscp
+tools/wincmd.py
+tools/ghidra_scripts/
+tools/parse_dialogs.py
+tools/parse_resources.py
+
+# Local compatibility launcher (not part of paim)
+mspaint-linux
+
+# Local clipboard experiment (not part of the published test suite)
+tools/test_text_clip.py
