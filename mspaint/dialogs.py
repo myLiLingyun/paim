@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Dialogs used by the GTK Paint clone."""
+"""Dialogs used by paim."""
 from __future__ import annotations
-
-import math
 
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Gdk', '4.0')
-from gi.repository import Gdk, GLib, Gtk
+from gi.repository import Gdk, Gtk
 
-from .raster import LINE_WIDTHS
+from .i18n import tr
 
 
 def label(text, xalign=0.0, css=None, wrap=False):
@@ -28,8 +26,8 @@ class BaseDialog(Gtk.Dialog):
         self.set_title(title)
         self.set_default_size(width, -1)
         self.set_resizable(False)
-        self.add_button('取消', Gtk.ResponseType.CANCEL)
-        self.add_button('确定', Gtk.ResponseType.OK)
+        self.add_button(tr('取消', 'Cancel'), Gtk.ResponseType.CANCEL)
+        self.add_button(tr('确定', 'OK'), Gtk.ResponseType.OK)
         self.set_default_response(Gtk.ResponseType.OK)
         self.connect('response', self._on_response)
         self.content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -50,53 +48,52 @@ class BaseDialog(Gtk.Dialog):
 
 class ResizeDialog(BaseDialog):
     def __init__(self, parent, width, height, callback):
-        super().__init__(parent, '调整大小和扭曲', 400)
+        super().__init__(parent, tr('调整大小和扭曲', 'Resize and skew'), 400)
         self.src_w, self.src_h = width, height
         self.callback = callback
         self.mode = 'percent'
         self.keep_ratio = True
 
         group = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
-        group.append(label('调整大小', css='section-title'))
+        group.append(label(tr('调整大小', 'Resize'), css='section-title'))
         group.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
-        group.append(label('倾斜', css='section-title'))
+        group.append(label(tr('倾斜', 'Skew'), css='section-title'))
         self.content.append(group)
 
         grid = Gtk.Grid(column_spacing=10, row_spacing=8)
         self.content.append(grid)
-        self.unit_pct = Gtk.CheckButton(label='百分比')
-        self.unit_px = Gtk.CheckButton(label='像素')
+        self.unit_pct = Gtk.CheckButton(label=tr('百分比', 'Percentage'))
+        self.unit_px = Gtk.CheckButton(label=tr('像素', 'Pixels'))
         self.unit_px.set_group(self.unit_pct)
         self.unit_pct.set_active(True)
-        grid.attach(label('单位:'), 0, 0, 2, 1)
+        grid.attach(label(tr('单位:', 'Units:')), 0, 0, 2, 1)
         grid.attach(self.unit_pct, 0, 1, 1, 1)
         grid.attach(self.unit_px, 1, 1, 1, 1)
-        grid.attach(label('水平:'), 0, 2, 1, 1)
+        grid.attach(label(tr('水平:', 'Horizontal:')), 0, 2, 1, 1)
         self.hspin = Gtk.SpinButton.new_with_range(1, 100000, 1)
         self.hspin.set_value(100)
         grid.attach(self.hspin, 1, 2, 1, 1)
-        grid.attach(label('垂直:'), 0, 3, 1, 1)
+        grid.attach(label(tr('垂直:', 'Vertical:')), 0, 3, 1, 1)
         self.vspin = Gtk.SpinButton.new_with_range(1, 100000, 1)
         self.vspin.set_value(100)
         grid.attach(self.vspin, 1, 3, 1, 1)
-        self.ratio = Gtk.CheckButton(label='保持纵横比')
+        self.ratio = Gtk.CheckButton(label=tr('保持纵横比', 'Maintain aspect ratio'))
         self.ratio.set_active(True)
         grid.attach(self.ratio, 0, 4, 2, 1)
 
-        sep = Gtk.Separator()
-        self.content.append(sep)
+        self.content.append(Gtk.Separator())
         skew = Gtk.Grid(column_spacing=10, row_spacing=8)
         self.content.append(skew)
-        skew.attach(label('水平:'), 0, 0, 1, 1)
+        skew.attach(label(tr('水平:', 'Horizontal:')), 0, 0, 1, 1)
         self.skew_h = Gtk.SpinButton.new_with_range(-89, 89, 1)
         self.skew_h.set_value(0)
         skew.attach(self.skew_h, 1, 0, 1, 1)
-        skew.attach(label('度'), 2, 0, 1, 1)
-        skew.attach(label('垂直:'), 0, 1, 1, 1)
+        skew.attach(label(tr('度', 'degrees')), 2, 0, 1, 1)
+        skew.attach(label(tr('垂直:', 'Vertical:')), 0, 1, 1, 1)
         self.skew_v = Gtk.SpinButton.new_with_range(-89, 89, 1)
         self.skew_v.set_value(0)
         skew.attach(self.skew_v, 1, 1, 1, 1)
-        skew.attach(label('度'), 2, 1, 1, 1)
+        skew.attach(label(tr('度', 'degrees')), 2, 1, 1, 1)
 
         self.unit_pct.connect('toggled', self._mode_changed)
         self.unit_px.connect('toggled', self._mode_changed)
@@ -159,34 +156,37 @@ class ResizeDialog(BaseDialog):
 
 class AttributesDialog(BaseDialog):
     def __init__(self, parent, doc, callback):
-        super().__init__(parent, '映像属性', 360)
+        super().__init__(parent, tr('映像属性', 'Image properties'), 360)
         self.doc = doc
         self.callback = callback
         grid = Gtk.Grid(column_spacing=10, row_spacing=8)
         self.content.append(grid)
-        grid.attach(label('宽度:'), 0, 0, 1, 1)
+        grid.attach(label(tr('宽度:', 'Width:')), 0, 0, 1, 1)
         self.wspin = Gtk.SpinButton.new_with_range(1, 100000, 1)
         self.wspin.set_value(doc.width)
         grid.attach(self.wspin, 1, 0, 1, 1)
-        grid.attach(label('高度:'), 0, 1, 1, 1)
+        grid.attach(label(tr('高度:', 'Height:')), 0, 1, 1, 1)
         self.hspin = Gtk.SpinButton.new_with_range(1, 100000, 1)
         self.hspin.set_value(doc.height)
         grid.attach(self.hspin, 1, 1, 1, 1)
-        grid.attach(label('单位:'), 0, 2, 1, 1)
-        self.units = Gtk.DropDown.new_from_strings(['像素', '英寸', '厘米'])
+        grid.attach(label(tr('单位:', 'Units:')), 0, 2, 1, 1)
+        units = [tr('像素', 'Pixels'), tr('英寸', 'Inches'), tr('厘米', 'Centimeters')]
+        self.units = Gtk.DropDown.new_from_strings(units)
         grid.attach(self.units, 1, 2, 1, 1)
-        grid.attach(label('颜色:'), 0, 3, 1, 1)
-        self.color = Gtk.CheckButton(label='彩色')
-        self.bw = Gtk.CheckButton(label='黑白')
+        grid.attach(label(tr('颜色:', 'Colors:')), 0, 3, 1, 1)
+        self.color = Gtk.CheckButton(label=tr('彩色', 'Color'))
+        self.bw = Gtk.CheckButton(label=tr('黑白', 'Black and white'))
         self.bw.set_group(self.color)
         self.color.set_active(True)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         box.append(self.color); box.append(self.bw)
         grid.attach(box, 1, 3, 1, 1)
-        self.transparent = Gtk.CheckButton(label='透明')
+        self.transparent = Gtk.CheckButton(label=tr('透明', 'Transparent'))
         self.transparent.set_active(False)
         grid.attach(self.transparent, 0, 4, 2, 1)
-        self.content.append(label('注意：将图像转换为黑白后无法撤销。', css='hint'))
+        self.content.append(label(tr('注意：将图像转换为黑白后无法撤销。',
+                                     'Note: converting the image to black and white cannot be undone.'),
+                                  css='hint'))
 
     def apply(self):
         factor = 1.0
@@ -200,15 +200,14 @@ class AttributesDialog(BaseDialog):
 
 
 class ColorDialog(BaseDialog):
-    def __init__(self, parent, initial, callback, title='编辑颜色'):
-        super().__init__(parent, title, 440)
+    def __init__(self, parent, initial, callback, title=None):
+        super().__init__(parent, title or tr('编辑颜色', 'Edit colors'), 440)
         self.callback = callback
         self.chooser = Gtk.ColorChooserWidget()
         self.chooser.set_use_alpha(False)
         self.chooser.set_rgba(Gdk.RGBA(initial[0] / 255, initial[1] / 255,
                                        initial[2] / 255, 1))
         self.content.append(self.chooser)
-        # basic Paint colors, clicking one puts it into the chooser
         grid = Gtk.Grid(column_spacing=3, row_spacing=3)
         from .raster import DEFAULT_PALETTE
         for i, color in enumerate(DEFAULT_PALETTE):
@@ -221,7 +220,9 @@ class ColorDialog(BaseDialog):
             b.connect('clicked', self._palette_click, color)
             grid.attach(b, i % 10, i // 10, 1, 1)
         self.content.append(grid)
-        self.content.append(label('在右侧颜色选择器中选择颜色，然后单击“确定”。', css='hint', wrap=True))
+        self.content.append(label(tr('在右侧颜色选择器中选择颜色，然后单击“确定”。',
+                                     'Choose a color in the picker on the right, then click OK.'),
+                                  css='hint', wrap=True))
 
     def _palette_click(self, btn, color):
         from .document import hex_to_rgb
@@ -236,17 +237,22 @@ class ColorDialog(BaseDialog):
 
 class SaveOptionsDialog(BaseDialog):
     def __init__(self, parent, fmt, callback):
-        super().__init__(parent, '保存选项', 320)
+        super().__init__(parent, tr('保存选项', 'Save options'), 340)
         self.fmt = fmt
         self.callback = callback
-        self.content.append(label('选择保存格式：', css='section-title'))
-        self.formats = Gtk.DropDown.new_from_strings(['PNG 图片', 'JPEG 图片', 'BMP 图片', 'GIF 图片'])
+        self.content.append(label(tr('选择保存格式：', 'Choose a format:'), css='section-title'))
+        formats = [tr('PNG 图片', 'PNG picture'), tr('JPEG 图片', 'JPEG picture'),
+                   tr('BMP 图片', 'BMP picture'), tr('GIF 图片', 'GIF picture')]
+        self.formats = Gtk.DropDown.new_from_strings(formats)
         mapping = {'png': 0, 'jpg': 1, 'jpeg': 1, 'bmp': 2, 'dib': 2, 'gif': 3}
         self.formats.set_selected(mapping.get(fmt, 0))
         self.content.append(self.formats)
-        self.depth_label = label('BMP 位深度：')
-        self.depth = Gtk.DropDown.new_from_strings(['单色位图 (1 位)', '16 色位图 (4 位)',
-                                                    '256 色位图 (8 位)', '24 位位图'])
+        self.depth_label = label(tr('BMP 位深度：', 'BMP bit depth:'))
+        depths = [tr('单色位图 (1 位)', 'Monochrome bitmap (1-bit)'),
+                  tr('16 色位图 (4 位)', '16-color bitmap (4-bit)'),
+                  tr('256 色位图 (8 位)', '256-color bitmap (8-bit)'),
+                  tr('24 位位图', '24-bit bitmap')]
+        self.depth = Gtk.DropDown.new_from_strings(depths)
         self.depth.set_selected(3)
         self.content.append(self.depth_label)
         self.content.append(self.depth)
@@ -266,35 +272,35 @@ class SaveOptionsDialog(BaseDialog):
 
 class PageSetupDialog(BaseDialog):
     def __init__(self, parent, settings, callback):
-        super().__init__(parent, '页面设置', 380)
+        super().__init__(parent, tr('页面设置', 'Page setup'), 380)
         self.settings = settings
         self.callback = callback
         grid = Gtk.Grid(column_spacing=10, row_spacing=8)
         self.content.append(grid)
-        grid.attach(label('方向:'), 0, 0, 1, 1)
-        self.portrait = Gtk.CheckButton(label='纵向')
-        self.landscape = Gtk.CheckButton(label='横向')
+        grid.attach(label(tr('方向:', 'Orientation:')), 0, 0, 1, 1)
+        self.portrait = Gtk.CheckButton(label=tr('纵向', 'Portrait'))
+        self.landscape = Gtk.CheckButton(label=tr('横向', 'Landscape'))
         self.landscape.set_group(self.portrait)
         self.portrait.set_active(not settings.get('landscape'))
         self.landscape.set_active(settings.get('landscape', False))
         box = Gtk.Box(spacing=10); box.append(self.portrait); box.append(self.landscape)
         grid.attach(box, 1, 0, 1, 1)
-        grid.attach(label('缩放:'), 0, 1, 1, 1)
+        grid.attach(label(tr('缩放:', 'Scale:')), 0, 1, 1, 1)
         self.scale = Gtk.SpinButton.new_with_range(10, 400, 1)
         self.scale.set_value(settings.get('scale', 100))
         grid.attach(self.scale, 1, 1, 1, 1)
         grid.attach(label('%'), 2, 1, 1, 1)
-        grid.attach(label('左边距:'), 0, 2, 1, 1)
+        grid.attach(label(tr('左边距:', 'Left margin:')), 0, 2, 1, 1)
         self.left = Gtk.SpinButton.new_with_range(0, 100, 0.1)
         self.left.set_value(settings.get('left', 0.5))
         grid.attach(self.left, 1, 2, 1, 1)
-        grid.attach(label('英寸'), 2, 2, 1, 1)
-        grid.attach(label('上边距:'), 0, 3, 1, 1)
+        grid.attach(label(tr('英寸', 'inches')), 2, 2, 1, 1)
+        grid.attach(label(tr('上边距:', 'Top margin:')), 0, 3, 1, 1)
         self.top = Gtk.SpinButton.new_with_range(0, 100, 0.1)
         self.top.set_value(settings.get('top', 0.5))
         grid.attach(self.top, 1, 3, 1, 1)
-        grid.attach(label('英寸'), 2, 3, 1, 1)
-        self.center = Gtk.CheckButton(label='居中')
+        grid.attach(label(tr('英寸', 'inches')), 2, 3, 1, 1)
+        self.center = Gtk.CheckButton(label=tr('居中', 'Center'))
         self.center.set_active(settings.get('center', True))
         self.content.append(self.center)
 
@@ -313,8 +319,13 @@ class AboutDialog(Gtk.AboutDialog):
         super().__init__(transient_for=parent, modal=True)
         self.set_program_name('paim')
         self.set_version('1.0.0')
-        self.set_comments('paim (paintImproved)\n一款轻快的 Linux GTK4 绘图应用\n支持绘图工具、选区、文本、图像调整和多种文件格式。')
-        self.set_website('https://github.com/')
+        comments = tr(
+            'paim (paintImproved)\n一款轻快的 Linux GTK4 绘图应用\n'
+            '支持绘图工具、选区、文本、图像调整和多种文件格式。',
+            'paim (paintImproved)\nA lightweight GTK4 drawing application for Linux.\n'
+            'Tools, selections, text, image adjustments and many file formats.')
+        self.set_comments(comments)
+        self.set_website('https://github.com/myLiLingyun/paim')
         self.set_license_type(Gtk.License.GPL_3_0)
         self.set_copyright('Copyright (C) 2026 paim contributors')
         self.set_logo_icon_name('applications-graphics')

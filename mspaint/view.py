@@ -12,8 +12,8 @@ from gi.repository import Gdk, GLib, Gtk
 
 from .document import Document, Selection, png_bytes_to_surface, surface_to_png_bytes
 from .raster import (BRUSH_ORDER, DEFAULT_PALETTE, bucket_fill, draw_curve,
-                     draw_eraser, draw_freehand, fill_shape, pick_color,
-                     stroke_segment)
+                     draw_eraser, draw_freehand, draw_pixel_line, fill_shape,
+                     pick_color, stroke_segment)
 from .shapes import SHAPE_ORDER, build_shape_path
 from .text import draw_text
 
@@ -554,10 +554,13 @@ class PaintCanvas(Gtk.Overlay):
             size = max(4, self.line_width * 2)
             draw_eraser(ctx, ix, iy, size, tuple(v / 255 for v in self.color2))
         elif self.tool == 'pencil':
-            ctx.set_line_width(max(1, self.line_width * 0.5))
-            ctx.set_source_rgb(*color)
-            ctx.arc(ix, iy, max(0.5, self.line_width * 0.25), 0, 2 * math.pi)
-            ctx.fill()
+            if self.line_width <= 1:
+                draw_pixel_line(self.doc.surface, ix, iy, ix, iy, color)
+            else:
+                ctx.set_line_width(max(1, self.line_width * 0.5))
+                ctx.set_source_rgb(*color)
+                ctx.arc(ix, iy, max(0.5, self.line_width * 0.25), 0, 2 * math.pi)
+                ctx.fill()
         elif self.tool == 'brush':
             stroke_segment(ctx, (ix, iy), (ix + 0.01, iy + 0.01), color,
                            self.line_width, self.brush, seed=1)
@@ -710,9 +713,12 @@ class PaintCanvas(Gtk.Overlay):
                             last[1] + (iy - last[1]) * t, size,
                             tuple(v / 255 for v in self.color2))
         elif self.tool == 'pencil':
-            ctx.set_line_width(max(1, self.line_width * 0.5))
-            ctx.set_source_rgb(*color)
-            ctx.move_to(*last); ctx.line_to(ix, iy); ctx.stroke()
+            if self.line_width <= 1:
+                draw_pixel_line(self.doc.surface, last[0], last[1], ix, iy, color)
+            else:
+                ctx.set_line_width(max(1, self.line_width * 0.5))
+                ctx.set_source_rgb(*color)
+                ctx.move_to(*last); ctx.line_to(ix, iy); ctx.stroke()
         elif self.tool == 'brush':
             stroke_segment(ctx, last, (ix, iy), color, self.line_width, self.brush,
                            seed=len(self._points))

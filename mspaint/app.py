@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -25,6 +26,7 @@ from .dialogs import (AboutDialog, AttributesDialog, ColorDialog, MessageDialog,
 from .document import Document, Selection, hex_to_rgb, rgba_to_hex, surface_to_png_bytes
 from . import icons as icon_module
 from .icons import PaintIcon, image as paint_image
+from .i18n import language_is_zh
 from .raster import (BRUSH_LABELS, BRUSH_ORDER, DEFAULT_PALETTE, LINE_WIDTHS,
                      SHAPE_FILL_STYLES, SHAPE_OUTLINE_STYLES)
 from .shapes import (GALLERY_ROWS, SHAPE_LABELS_EN, SHAPE_LABELS_ZH,
@@ -46,6 +48,8 @@ headerbar.paint-header windowcontrols button { min-height: 22px; min-width: 30px
 box.title-quick { background: transparent; }
 button.quick { min-width: 24px; min-height: 24px; padding: 2px; margin: 0; background: transparent; border: 1px solid transparent; border-radius: 3px; }
 button.quick:hover { background: #e3f0fb; border-color: #9dc4e8; }
+menubutton.quick > button { min-width: 24px; min-height: 24px; padding: 2px; margin: 0; background: transparent; border: 1px solid transparent; border-radius: 3px; }
+menubutton.quick > button:hover { background: #e3f0fb; border-color: #9dc4e8; }
 .tabbar { background: #f4f4f4; border-bottom: 1px solid #b9b9b9; padding: 0 5px; }
 button.ribbon-tab { min-height: 25px; padding: 3px 16px; margin: 0 1px; border: 1px solid transparent; border-radius: 3px 3px 0 0; background: transparent; font-size: 13px; }
 button.ribbon-tab:hover { background: #e7f1fa; border-color: #b8d3ea; }
@@ -110,6 +114,8 @@ button.ribbon-tab:hover { background: #343a44; border-color: #4d5b69; }
 button.ribbon-tab.active-tab { background: #303136; border-color: #4c4d52; border-bottom-color: #303136; color: #ffffff; }
 menubutton.file-tab > button { background: #2b6fa9; color: #ffffff; }
 menubutton.file-tab > button:hover { background: #357fbe; }
+menubutton.quick > button { background: transparent; border-color: transparent; }
+menubutton.quick > button:hover { background: #37414c; border-color: #526271; }
 .ribbon { background: #292a2d; border-bottom-color: #3a3b3f; }
 .ribbon-group { border-right-color: #3b3c40; }
 .ribbon-group-label, .ribbon-label, .ribbon-small-label { color: #d9d9dc; }
@@ -133,7 +139,9 @@ menubutton.file-tab > button:hover { background: #357fbe; }
 button.backstage-item { color: #e9e9ec; }
 button.backstage-item:hover, button.recent-item:hover { background: #37414c; }
 button.recent-item { color: #e9e9ec; }
-popover, popover.background, popover > contents { background-color: #292a2d; color: #e9e9ec; }
+popover.background { background-color: transparent; box-shadow: none; }
+popover.background > contents { background-color: #292a2d; color: #e9e9ec; }
+popover > arrow { background-color: #292a2d; }
 popover button { color: #e9e9ec; }
 popover button:hover { background: #37414c; }
 entry, spinbutton, dropdown, combobox { background-color: #202124; color: #e9e9ec; border-color: #47484c; }
@@ -151,10 +159,37 @@ headerbar button:hover, .titlebar button:hover { background-color: #37414c; }
 _CSS_PROVIDER = None
 
 
+def _interface_settings():
+    try:
+        return Gio.Settings.new('org.gnome.desktop.interface')
+    except Exception:
+        return None
+
+
+def _system_color_scheme():
+    """Return 'prefer-dark', 'prefer-light', 'default', or None.
+
+    GNOME's appearance toggle is written to color-scheme.  The legacy
+    ``gtk-theme`` setting can keep pointing at a *-dark theme after the user
+    switches to the light appearance, so color-scheme must win when present.
+    """
+    gs = _interface_settings()
+    if gs is None:
+        return None
+    try:
+        return gs.get_string('color-scheme')
+    except Exception:
+        return None
+
+
 def detect_dark_theme():
     env = os.environ.get('GTK_THEME', '').lower()
-    if 'dark' in env:
-        return True
+    if env:
+        # An explicit GTK_THEME is an intentional per-process override.
+        return 'dark' in env
+    scheme = _system_color_scheme()
+    if scheme in ('prefer-dark', 'prefer-light', 'default'):
+        return scheme == 'prefer-dark'
     settings = Gtk.Settings.get_default()
     if settings is not None:
         try:
@@ -169,6 +204,58 @@ def detect_dark_theme():
         except Exception:
             pass
     return False
+
+
+def _theme_available(name):
+    if not name:
+        return False
+    if name in ('Adwaita', 'Adwaita-dark', 'HighContrast'):
+        return True
+    for root in (os.path.expanduser('~/.themes'),
+                 os.path.expanduser('~/.local/share/themes'),
+                 '/usr/share/themes', '/usr/local/share/themes'):
+        if os.path.isdir(os.path.join(root, name)):
+            return True
+    return False
+
+
+def apply_native_theme(dark):
+    """Keep native GTK widgets (dialogs, popovers, choosers) in the same mode.
+
+    A user may have a dark legacy GTK theme while GNOME's appearance setting
+    is light.  In that case switch this process to the matching light variant
+    so dialogs and menus do not stay dark while paim's own UI turns light.
+    """
+    settings = Gtk.Settings.get_default()
+    if settings is None:
+        return
+    try:
+        current = settings.get_property('gtk-theme-name') or ''
+    except Exception:
+        current = ''
+    base = re.sub(r'[-_]dark$', '', current, flags=re.IGNORECASE)
+    if dark:
+        candidates = [current if 'dark' in current.lower() else '',
+                      base + '-dark', 'Adwaita-dark', 'Adwaita']
+    else:
+        candidates = [base, 'Adwaita']
+    target = None
+    for candidate in candidates:
+        if candidate and _theme_available(candidate):
+            target = candidate
+            break
+    try:
+        if target and target != current:
+            settings.set_property('gtk-theme-name', target)
+        try:
+            scheme = (Gtk.InterfaceColorScheme.DARK if dark
+                      else Gtk.InterfaceColorScheme.LIGHT)
+            settings.set_property('gtk-interface-color-scheme', scheme)
+        except Exception:
+            # Older GTK releases only have the deprecated boolean property.
+            settings.set_property('gtk-application-prefer-dark-theme', bool(dark))
+    except Exception:
+        pass
 
 
 def install_css(dark=None):
@@ -189,10 +276,6 @@ def install_css(dark=None):
                                               Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
     _CSS_PROVIDER = provider
 
-
-def language_is_zh():
-    lang = os.environ.get('LANG', '')
-    return not lang or lang.lower().startswith(('zh', 'c', 'posix'))
 
 
 class PaintApplication(Gtk.Application):
@@ -217,7 +300,14 @@ class PaintWindow(Gtk.ApplicationWindow):
         super().__init__(application=app)
         self.app = app
         self.lang_zh = language_is_zh()
-        self.dark_mode = detect_dark_theme()
+        self._load_preferences()
+        self.qat_registry = {}
+        self.qat_buttons = {}
+        self._init_qat_registry()
+        self.dark_mode = self._resolve_dark()
+        self._applying_theme = False
+        self._updating_theme_menu = False
+        apply_native_theme(self.dark_mode)
         icon_module.set_dark_theme(self.dark_mode)
         install_css(self.dark_mode)
         self.set_default_size(1500, 900)
@@ -243,7 +333,56 @@ class PaintWindow(Gtk.ApplicationWindow):
         if settings is not None:
             settings.connect('notify::gtk-theme-name', self._on_system_theme_changed)
             settings.connect('notify::gtk-application-prefer-dark-theme', self._on_system_theme_changed)
+        interface = _interface_settings()
+        if interface is not None:
+            interface.connect('changed::color-scheme', self._on_system_theme_changed)
+            interface.connect('changed::gtk-theme', self._on_system_theme_changed)
+            self._interface_settings = interface
         self.connect('close-request', self._on_close_request)
+
+    # ------------------------------------------------------------------
+    # Preferences
+    def _settings_path(self):
+        return Path(GLib.get_user_config_dir()) / 'paim' / 'settings.json'
+
+    def _load_preferences(self):
+        self.theme_mode = 'auto'
+        self.qat_pinned = ['save', 'undo', 'redo']
+        try:
+            path = self._settings_path()
+            if path.exists():
+                data = json.loads(path.read_text(encoding='utf-8'))
+                mode = data.get('theme_mode', 'auto')
+                if mode in ('auto', 'light', 'dark'):
+                    self.theme_mode = mode
+                qat = data.get('qat')
+                if isinstance(qat, list):
+                    self.qat_pinned = [str(x) for x in qat if isinstance(x, str)]
+        except Exception:
+            pass
+        # Remove duplicates but keep ordering.
+        seen = set()
+        self.qat_pinned = [x for x in self.qat_pinned if not (x in seen or seen.add(x))]
+
+    def _save_preferences(self):
+        try:
+            path = self._settings_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix('.tmp')
+            tmp.write_text(json.dumps({
+                'theme_mode': self.theme_mode,
+                'qat': self.qat_pinned,
+            }, ensure_ascii=False, indent=2), encoding='utf-8')
+            os.replace(tmp, path)
+        except Exception:
+            pass
+
+    def _resolve_dark(self):
+        if self.theme_mode == 'dark':
+            return True
+        if self.theme_mode == 'light':
+            return False
+        return detect_dark_theme()
 
     # ------------------------------------------------------------------
     # Translation helper
@@ -262,19 +401,18 @@ class PaintWindow(Gtk.ApplicationWindow):
         self.title_label.add_css_class('title')
         self.header.set_title_widget(self.title_label)
 
-        quick = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=1)
-        quick.add_css_class('title-quick')
-        self.btn_save = self._quick_button('save', self.tr('保存', 'Save'), self._save_clicked)
-        self.btn_undo = self._quick_button('undo', self.tr('撤消', 'Undo'), self._undo)
-        self.btn_redo = self._quick_button('redo', self.tr('重做', 'Redo'), self._redo)
-        self.btn_customize = self._quick_button('dropdown', self.tr('自定义快速访问工具栏', 'Customize Quick Access Toolbar'),
-                                                self._quick_customize)
-        quick.append(self.btn_save)
-        quick.append(self.btn_undo)
-        quick.append(self.btn_redo)
-        quick.append(self.btn_customize)
-        self.header.pack_start(quick)
+        self.quick_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=1)
+        self.quick_box.add_css_class('title-quick')
+        self.qat_items_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=1)
+        self.quick_box.append(self.qat_items_box)
+        self.btn_customize = self._quick_button(
+            'dropdown',
+            self.tr('自定义快速访问工具栏', 'Customize Quick Access Toolbar'),
+            self._quick_customize)
+        self.quick_box.append(self.btn_customize)
+        self.header.pack_start(self.quick_box)
         self.set_titlebar(self.header)
+        self._rebuild_qat()
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
@@ -448,6 +586,268 @@ class PaintWindow(Gtk.ApplicationWindow):
         b.connect('clicked', lambda *a: callback())
         return b
 
+    # ------------------------------------------------------------------
+    # Quick Access Toolbar
+    def _init_qat_registry(self):
+        def reg(key, zh, en, icon, callback, menu=None):
+            self.qat_registry[key] = {'zh': zh, 'en': en, 'icon': icon,
+                                      'callback': callback, 'menu': menu}
+        reg('save', '保存', 'Save', 'save', self._save_clicked)
+        reg('undo', '撤消', 'Undo', 'undo', self._undo)
+        reg('redo', '重做', 'Redo', 'redo', self._redo)
+        reg('new', '新建', 'New', 'new', self._new_clicked)
+        reg('open', '打开', 'Open', 'open', self._open_clicked)
+        reg('print', '打印', 'Print', 'print', lambda: self._print())
+        reg('cut', '剪切', 'Cut', 'cut', self._cut_clicked)
+        reg('copy', '复制', 'Copy', 'copy', self._copy_clicked)
+        reg('paste', '粘贴', 'Paste', 'paste', self._paste_clicked)
+        reg('select', '选择', 'Select', 'select_rect', lambda: self._qat_tool('select'))
+        reg('crop', '裁剪', 'Crop', 'crop', self._crop)
+        reg('resize', '调整大小', 'Resize', 'resize', self._resize_dialog)
+        reg('invert', '反色', 'Invert colors', 'edit_colors', self._invert_colors)
+        reg('pencil', '铅笔', 'Pencil', 'pencil', lambda: self._qat_tool('pencil'))
+        reg('fill', '用颜色填充', 'Fill with color', 'fill', lambda: self._qat_tool('fill'))
+        reg('text', '文本', 'Text', 'text', lambda: self._qat_tool('text'))
+        reg('eraser', '橡皮擦', 'Eraser', 'eraser', lambda: self._qat_tool('eraser'))
+        reg('picker', '颜色选取器', 'Color picker', 'picker', lambda: self._qat_tool('picker'))
+        reg('magnifier', '放大镜', 'Magnifier', 'magnifier', lambda: self._qat_tool('magnifier'))
+        reg('brush', '刷子', 'Brushes', 'brush', lambda: self._qat_tool('brush'))
+        reg('zoom-in', '放大', 'Zoom in', 'zoomin', lambda: self.canvas.zoom_in())
+        reg('zoom-out', '缩小', 'Zoom out', 'zoomout', lambda: self.canvas.zoom_out())
+        reg('zoom-100', '100%', '100%', 'magnifier', lambda: self.canvas.set_zoom(1.0))
+        reg('fullscreen', '全屏', 'Full screen', 'fullscreen', self._toggle_fullscreen)
+        reg('rotate', '旋转', 'Rotate', 'rotate', None, menu='rotate')
+        reg('shapes', '形状', 'Shapes', 'shapes', None, menu='shapes')
+        reg('outline', '轮廓', 'Outline', 'outline', None, menu='outline')
+        reg('fill-style', '填充', 'Fill', 'fill_style', None, menu='fill')
+        reg('size', '粗细', 'Size', 'outline', None, menu='size')
+        reg('colors', '颜色', 'Colors', 'edit_colors', None, menu='colors')
+        reg('ruler', '标尺', 'Rulers', 'ruler',
+            lambda: self.cb_ruler.set_active(not self.cb_ruler.get_active()))
+        reg('grid', '网格线', 'Gridlines', 'grid',
+            lambda: self.cb_grid.set_active(not self.cb_grid.get_active()))
+        reg('statusbar', '状态栏', 'Status bar', 'statusbar',
+            lambda: self.cb_status.set_active(not self.cb_status.get_active()))
+        reg('thumbnail', '缩略图', 'Thumbnail', 'thumbnail', self._toggle_thumbnail)
+        reg('theme', '主题', 'Theme', 'theme', None, menu='theme')
+
+    def _noop(self):
+        pass
+
+    def _qat_tool(self, tool):
+        self._commit_current_text()
+        self.canvas.set_tool(tool)
+        self._set_tool_button_state(tool)
+        if hasattr(self, 'textbar_revealer'):
+            self.textbar_revealer.set_reveal_child(tool == 'text')
+
+    def _qat_label(self, spec):
+        return spec['zh'] if self.lang_zh else spec['en']
+
+    def _rebuild_qat(self):
+        if not hasattr(self, 'qat_items_box'):
+            return
+        while self.qat_items_box.get_first_child():
+            self.qat_items_box.remove(self.qat_items_box.get_first_child())
+        self.qat_buttons = {}
+        for key in list(self.qat_pinned):
+            spec = self.qat_registry.get(key)
+            if spec is None:
+                continue
+            if spec.get('menu'):
+                btn = Gtk.MenuButton()
+                btn.add_css_class('quick')
+                btn.set_always_show_arrow(False)
+                btn.set_child(PaintIcon(spec['icon'], 18))
+                btn.set_tooltip_text(self._qat_label(spec))
+                btn.set_popover(self._build_qat_menu(spec['menu']))
+            else:
+                btn = self._quick_button(spec['icon'], self._qat_label(spec), spec['callback'])
+                btn.set_tooltip_text(self._qat_label(spec))
+            self._attach_qat(btn, key)
+            self.qat_items_box.append(btn)
+            self.qat_buttons[key] = btn
+        self._update_quick_access()
+
+    def _build_qat_menu(self, kind):
+        pop = Gtk.Popover()
+        pop.set_has_arrow(True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        box.set_margin_top(6); box.set_margin_bottom(6)
+        box.set_margin_start(8); box.set_margin_end(8)
+
+        def close_and(fn):
+            pop.popdown()
+            fn()
+
+        if kind == 'shapes':
+            grid = Gtk.Grid(column_spacing=2, row_spacing=2)
+            for i, shape in enumerate(SHAPE_ORDER):
+                b = Gtk.Button()
+                b.add_css_class('shape-button')
+                label = SHAPE_LABELS_ZH.get(shape, shape) if self.lang_zh else SHAPE_LABELS_EN.get(shape, shape)
+                b.set_tooltip_text(label)
+                b.set_child(ShapeIcon(shape, 24))
+                b.connect('clicked', lambda x, s=shape: close_and(lambda: self._choose_shape(s)))
+                grid.attach(b, i % 5, i // 5, 1, 1)
+            box.append(grid)
+        elif kind == 'rotate':
+            options = [
+                (self.tr('向右旋转 90 度', 'Rotate right 90°'), 'right'),
+                (self.tr('向左旋转 90 度', 'Rotate left 90°'), 'left'),
+                (self.tr('旋转 180 度', 'Rotate 180°'), '180'),
+                (self.tr('垂直翻转', 'Flip vertical'), 'flip_v'),
+                (self.tr('水平翻转', 'Flip horizontal'), 'flip_h'),
+            ]
+            for text, mode in options:
+                b = Gtk.Button(label=text)
+                b.set_halign(Gtk.Align.FILL)
+                b.connect('clicked', lambda x, m=mode: close_and(lambda: self._rotate(m)))
+                box.append(b)
+        elif kind in ('outline', 'fill'):
+            styles = SHAPE_OUTLINE_STYLES if kind == 'outline' else SHAPE_FILL_STYLES
+            for key, (zh, en) in styles.items():
+                b = Gtk.Button(label=zh if self.lang_zh else en)
+                b.set_halign(Gtk.Align.FILL)
+                b.connect('clicked', lambda x, k=key, kd=kind: close_and(lambda: self._set_style(kd, k)))
+                box.append(b)
+        elif kind == 'size':
+            grid = Gtk.Grid(column_spacing=3, row_spacing=3)
+            for i, width in enumerate(LINE_WIDTHS):
+                b = Gtk.Button(label=f'{width} px')
+                b.set_halign(Gtk.Align.FILL)
+                b.connect('clicked', lambda x, w=width: close_and(lambda: self._set_line_width(w)))
+                grid.attach(b, i % 3, i // 3, 1, 1)
+            box.append(grid)
+        elif kind == 'colors':
+            from .document import hex_to_rgb
+            head = Gtk.Grid(column_spacing=2, row_spacing=2)
+            for i, color in enumerate(DEFAULT_PALETTE[:20]):
+                b = Gtk.Button()
+                b.add_css_class('palette-swatch')
+                b.set_size_request(20, 20)
+                p = Gtk.CssProvider()
+                p.load_from_data(f'button {{ background: {color}; min-width: 18px; min-height: 18px; }}'.encode())
+                b.get_style_context().add_provider(p, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+                b.set_tooltip_text(color)
+                b.connect('clicked', lambda x, c=color: close_and(lambda: self._palette_left(c)))
+                head.attach(b, i % 10, i // 10, 1, 1)
+            box.append(head)
+            edit = Gtk.Button(label=self.tr('编辑颜色...', 'Edit colors...'))
+            edit.connect('clicked', lambda x: close_and(lambda: self._edit_color(1)))
+            box.append(edit)
+        elif kind == 'theme':
+            group = None
+            for mode, text in (('auto', self.tr('跟随系统', 'Follow system')),
+                               ('light', self.tr('浅色', 'Light')),
+                               ('dark', self.tr('深色', 'Dark'))):
+                cb = Gtk.CheckButton(label=text)
+                if group is not None:
+                    cb.set_group(group)
+                else:
+                    group = cb
+                cb.set_active(mode == self.theme_mode)
+                cb.connect('toggled', lambda b, m=mode: close_and(lambda: self._set_theme_mode(m)) if b.get_active() else None)
+                box.append(cb)
+        pop.set_child(box)
+        return pop
+
+    def _attach_qat(self, widget, key):
+        if key not in self.qat_registry:
+            return
+        gesture = Gtk.GestureClick()
+        gesture.set_button(3)
+        gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        gesture.connect('pressed', lambda g, n, x, y, w=widget, k=key:
+                        self._show_qat_context(w, k))
+        widget.add_controller(gesture)
+
+    def _show_qat_context(self, widget, key):
+        spec = self.qat_registry.get(key)
+        if spec is None:
+            return
+        if getattr(self, '_qat_context_popover', None) is not None:
+            try:
+                self._qat_context_popover.popdown()
+                self._qat_context_popover.unparent()
+            except Exception:
+                pass
+        pop = Gtk.Popover()
+        pop.set_has_arrow(True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_margin_top(6); box.set_margin_bottom(6)
+        box.set_margin_start(8); box.set_margin_end(8)
+        title = Gtk.Label(label=self._qat_label(spec))
+        title.set_xalign(0)
+        title.add_css_class('group-title')
+        box.append(title)
+        pinned = key in self.qat_pinned
+        action = Gtk.Button(label=self.tr('从快速访问工具栏删除', 'Remove from Quick Access Toolbar')
+                            if pinned else
+                            self.tr('添加到快速访问工具栏', 'Add to Quick Access Toolbar'))
+        def do_toggle():
+            pop.popdown()
+            pop.unparent()
+            if pinned:
+                GLib.idle_add(self._toggle_qat_pin, key, False)
+            else:
+                self._toggle_qat_pin(key, True)
+        action.connect('clicked', lambda *a: do_toggle())
+        box.append(action)
+        pop.set_child(box)
+        pop.set_parent(widget)
+        self._qat_context_popover = pop
+        pop.popup()
+
+    def _toggle_qat_pin(self, key, pin):
+        if pin:
+            if key not in self.qat_pinned:
+                self.qat_pinned.append(key)
+        else:
+            if key in self.qat_pinned:
+                self.qat_pinned.remove(key)
+        self._save_preferences()
+        self._rebuild_qat()
+        return False
+
+    def _quick_customize(self):
+        if getattr(self, '_qat_customize_popover', None) is not None:
+            try:
+                self._qat_customize_popover.popdown()
+                self._qat_customize_popover.unparent()
+            except Exception:
+                pass
+            self._qat_customize_popover = None
+        pop = Gtk.Popover()
+        pop.set_has_arrow(True)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        outer.set_margin_top(8); outer.set_margin_bottom(8)
+        outer.set_margin_start(10); outer.set_margin_end(10)
+        title = Gtk.Label(label=self.tr('快速访问工具栏', 'Quick Access Toolbar'))
+        title.set_xalign(0)
+        title.add_css_class('section-title')
+        outer.append(title)
+        hint = Gtk.Label(label=self.tr('勾选要显示在标题栏的命令；也可以右键功能区命令直接添加。',
+                                       'Check commands to show in the title bar, or right-click a ribbon command.'))
+        hint.set_xalign(0); hint.set_wrap(True); hint.add_css_class('hint')
+        hint.set_max_width_chars(40)
+        outer.append(hint)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        for key, spec in self.qat_registry.items():
+            cb = Gtk.CheckButton(label=self._qat_label(spec))
+            cb.set_active(key in self.qat_pinned)
+            cb.connect('toggled', lambda b, k=key: self._toggle_qat_pin(k, b.get_active()))
+            inner.append(cb)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_size_request(300, 380)
+        scroller.set_child(inner)
+        outer.append(scroller)
+        pop.set_child(outer)
+        pop.set_parent(self.btn_customize)
+        self._qat_customize_popover = pop
+        pop.popup()
+
     def _ribbon_group(self, title, child, *, min_width=None):
         group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         group.add_css_class('ribbon-group')
@@ -528,6 +928,7 @@ class PaintWindow(Gtk.ApplicationWindow):
         self.paste_btn = self._big_button('paste', self.tr('粘贴', 'Paste'),
                                           self.tr('粘贴剪贴板的内容。', 'Paste the clipboard contents.'),
                                           self._paste_clicked)
+        self._attach_qat(self.paste_btn, 'paste')
         paste_box.append(self.paste_btn)
         self.paste_menu = Gtk.MenuButton()
         self.paste_menu.add_css_class('flat')
@@ -545,12 +946,16 @@ class PaintWindow(Gtk.ApplicationWindow):
         self.paste_menu.set_popover(pop)
         paste_box.append(self.paste_menu)
         clip.append(paste_box)
-        clip.append(self._big_button('cut', self.tr('剪切', 'Cut'),
-                                     self.tr('从画布中剪切选定内容。', 'Cut the selection.'),
-                                     self._cut_clicked))
-        clip.append(self._big_button('copy', self.tr('复制', 'Copy'),
-                                     self.tr('复制选定内容。', 'Copy the selection.'),
-                                     self._copy_clicked))
+        cut_btn = self._big_button('cut', self.tr('剪切', 'Cut'),
+                                   self.tr('从画布中剪切选定内容。', 'Cut the selection.'),
+                                   self._cut_clicked)
+        copy_btn = self._big_button('copy', self.tr('复制', 'Copy'),
+                                    self.tr('复制选定内容。', 'Copy the selection.'),
+                                    self._copy_clicked)
+        self._attach_qat(cut_btn, 'cut')
+        self._attach_qat(copy_btn, 'copy')
+        clip.append(cut_btn)
+        clip.append(copy_btn)
         ribbon.append(self._ribbon_group(self.tr('剪贴板', 'Clipboard'), clip))
 
         # Image group
@@ -560,6 +965,7 @@ class PaintWindow(Gtk.ApplicationWindow):
         self.sel_button = self._big_button('select_rect', self.tr('选择', 'Select'),
                                            self.tr('选择图片的一部分。', 'Select part of the picture.'),
                                            lambda: self.canvas.set_tool('select'))
+        self._attach_qat(self.sel_button, 'select')
         sel_row.append(self.sel_button)
         self.sel_menu = Gtk.MenuButton()
         self.sel_menu.add_css_class('flat')
@@ -594,10 +1000,13 @@ class PaintWindow(Gtk.ApplicationWindow):
         img_grid = Gtk.Grid(column_spacing=2, row_spacing=2)
         crop = self._stacked_button('crop', self.tr('裁剪', 'Crop'),
                                     self.tr('裁剪 (Ctrl+Shift+X)', 'Crop (Ctrl+Shift+X)'), self._crop)
+        self._attach_qat(crop, 'crop')
         invert = self._stacked_button('edit_colors', self.tr('反色', 'Invert'),
                                       self.tr('反色 (Ctrl+Shift+I)', 'Invert colors (Ctrl+Shift+I)'), self._invert_colors)
+        self._attach_qat(invert, 'invert')
         resize = self._stacked_button('resize', self.tr('调整大小', 'Resize'),
                                       self.tr('调整大小 (Ctrl+W)', 'Resize (Ctrl+W)'), self._resize_dialog)
+        self._attach_qat(resize, 'resize')
         rot = Gtk.MenuButton()
         rot.add_css_class('flat')
         rotbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -620,6 +1029,7 @@ class PaintWindow(Gtk.ApplicationWindow):
             rbox.append(bb)
         rpop.set_child(rbox)
         rot.set_popover(rpop)
+        self._attach_qat(rot, 'rotate')
         img_grid.attach(crop, 0, 0, 1, 1)
         img_grid.attach(invert, 1, 0, 1, 1)
         img_grid.attach(resize, 0, 1, 1, 1)
@@ -639,6 +1049,7 @@ class PaintWindow(Gtk.ApplicationWindow):
         ]
         for i, (icon, tool, label) in enumerate(tool_defs):
             btn = self._small_tool_toggle(icon, label, tool)
+            self._attach_qat(btn, tool)
             tools.attach(btn, i % 3, i // 3, 1, 1)
         ribbon.append(self._ribbon_group(self.tr('工具', 'Tools'), tools))
 
@@ -648,6 +1059,7 @@ class PaintWindow(Gtk.ApplicationWindow):
         self.brush_btn = self._big_button('brush', self.tr('刷子', 'Brushes'),
                                           self.tr('用不同种类的刷子绘画。', 'Paint with different brushes.'),
                                           lambda: self.canvas.set_tool('brush'), toggle=True)
+        self._attach_qat(self.brush_btn, 'brush')
         brush_top.append(self.brush_btn)
         self.brush_menu = Gtk.MenuButton()
         self.brush_menu.add_css_class('flat')
@@ -699,6 +1111,8 @@ class PaintWindow(Gtk.ApplicationWindow):
                                                     SHAPE_OUTLINE_STYLES, 'outline')
         self.fill_menu = self._style_menu_button('fill_style', self.tr('填充', 'Fill'),
                                                  SHAPE_FILL_STYLES, 'fill')
+        self._attach_qat(self.outline_menu, 'outline')
+        self._attach_qat(self.fill_menu, 'fill-style')
         opts.append(self.outline_menu)
         opts.append(self.fill_menu)
         ribbon.append(self._ribbon_group('', opts, min_width=78))
@@ -719,6 +1133,7 @@ class PaintWindow(Gtk.ApplicationWindow):
             widthbox.append(bb)
         spop2.set_child(widthbox)
         self.size_menu.set_popover(spop2)
+        self._attach_qat(self.size_menu, 'size')
         size_box.append(self.size_menu)
         ribbon.append(self._ribbon_group('', size_box, min_width=55))
 
@@ -730,6 +1145,7 @@ class PaintWindow(Gtk.ApplicationWindow):
         self.color1_btn.add_css_class('color-chip')
         self.color1_btn.set_tooltip_text(self.tr('颜色 1 (前景色)', 'Color 1 (foreground)'))
         self.color1_btn.connect('clicked', lambda *a: self._edit_color(1))
+        self._attach_qat(self.color1_btn, 'colors')
         lab1 = Gtk.Label(label=self.tr('颜色 1', 'Color 1')); lab1.add_css_class('ribbon-label')
         c1row.append(self.color1_btn); c1row.append(lab1)
         c2row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
@@ -737,6 +1153,7 @@ class PaintWindow(Gtk.ApplicationWindow):
         self.color2_btn.add_css_class('color-chip')
         self.color2_btn.set_tooltip_text(self.tr('颜色 2 (背景色)', 'Color 2 (background)'))
         self.color2_btn.connect('clicked', lambda *a: self._edit_color(2))
+        self._attach_qat(self.color2_btn, 'colors')
         lab2 = Gtk.Label(label=self.tr('颜色 2', 'Color 2')); lab2.add_css_class('ribbon-label')
         c2row.append(self.color2_btn); c2row.append(lab2)
         c12.append(c1row); c12.append(c2row)
@@ -783,14 +1200,19 @@ class PaintWindow(Gtk.ApplicationWindow):
         ribbon = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         ribbon.add_css_class('ribbon')
         zoom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        zoom.append(self._big_button('zoomin', self.tr('放大', 'Zoom in'),
-                                     self.tr('放大当前图片。 (Ctrl+PgUp)', 'Zoom in (Ctrl+PgUp)'),
-                                     self.canvas.zoom_in))
-        zoom.append(self._big_button('zoomout', self.tr('缩小', 'Zoom out'),
-                                     self.tr('缩小当前图片。 (Ctrl+PgDn)', 'Zoom out (Ctrl+PgDn)'),
-                                     self.canvas.zoom_out))
+        zin = self._big_button('zoomin', self.tr('放大', 'Zoom in'),
+                               self.tr('放大当前图片。 (Ctrl+PgUp)', 'Zoom in (Ctrl+PgUp)'),
+                               self.canvas.zoom_in)
+        zout = self._big_button('zoomout', self.tr('缩小', 'Zoom out'),
+                                self.tr('缩小当前图片。 (Ctrl+PgDn)', 'Zoom out (Ctrl+PgDn)'),
+                                self.canvas.zoom_out)
+        self._attach_qat(zin, 'zoom-in')
+        self._attach_qat(zout, 'zoom-out')
+        zoom.append(zin)
+        zoom.append(zout)
         z100 = self._big_button('magnifier', '100%', self.tr('缩放到 100%', 'Zoom to 100%'),
                                 lambda: self.canvas.set_zoom(1.0))
+        self._attach_qat(z100, 'zoom-100')
         zoom.append(z100)
         ribbon.append(self._ribbon_group(self.tr('缩放', 'Zoom'), zoom))
 
@@ -800,20 +1222,64 @@ class PaintWindow(Gtk.ApplicationWindow):
         self.cb_status = Gtk.CheckButton(label=self.tr('状态栏', 'Status bar'))
         self.cb_ruler.connect('toggled', lambda b: self._toggle_rulers(b.get_active()))
         self.cb_grid.connect('toggled', lambda b: self._toggle_grid(b.get_active()))
+        self._attach_qat(self.cb_ruler, 'ruler')
+        self._attach_qat(self.cb_grid, 'grid')
         self.cb_status.set_active(True)
         self.cb_status.connect('toggled', lambda b: self._toggle_status(b.get_active()))
+        self._attach_qat(self.cb_status, 'statusbar')
         show.append(self.cb_ruler); show.append(self.cb_grid); show.append(self.cb_status)
         ribbon.append(self._ribbon_group(self.tr('显示或隐藏', 'Show or hide'), show))
 
         disp = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        disp.append(self._big_button('fullscreen', self.tr('全屏', 'Full screen'),
-                                     self.tr('全屏查看图片。 (F11)', 'View full screen (F11)'),
-                                     self._toggle_fullscreen))
+        fs_btn = self._big_button('fullscreen', self.tr('全屏', 'Full screen'),
+                                  self.tr('全屏查看图片。 (F11)', 'View full screen (F11)'),
+                                  self._toggle_fullscreen)
+        self._attach_qat(fs_btn, 'fullscreen')
+        disp.append(fs_btn)
         self.thumb_btn = self._big_button('thumbnail', self.tr('缩略图', 'Thumbnail'),
                                           self.tr('显示或隐藏缩略图。', 'Show or hide the thumbnail'),
                                           self._toggle_thumbnail)
+        self._attach_qat(self.thumb_btn, 'thumbnail')
         disp.append(self.thumb_btn)
         ribbon.append(self._ribbon_group(self.tr('显示', 'Display'), disp))
+
+        # Application theme: system / light / dark.  This is paim-specific and
+        # persists independently of the desktop's GTK theme.
+        theme_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        theme_menu = Gtk.MenuButton()
+        self.theme_menu = theme_menu
+        theme_menu.add_css_class('flat')
+        theme_inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
+        self.theme_mode_label = Gtk.Label()
+        self.theme_mode_label.add_css_class('ribbon-small-label')
+        theme_inner.append(self.theme_mode_label)
+        theme_inner.append(PaintIcon('dropdown', 12))
+        theme_menu.set_child(theme_inner)
+        theme_menu.set_tooltip_text(self.tr('应用主题', 'Application theme'))
+        theme_pop = Gtk.Popover()
+        theme_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.theme_mode_buttons = {}
+        first_btn = None
+        for mode, text in (
+                ('auto', self.tr('跟随系统', 'Follow system')),
+                ('light', self.tr('浅色', 'Light')),
+                ('dark', self.tr('深色', 'Dark'))):
+            cb = Gtk.CheckButton(label=text)
+            if first_btn is not None:
+                cb.set_group(first_btn)
+            else:
+                first_btn = cb
+            cb.set_active(mode == self.theme_mode)
+            cb.connect('toggled', self._on_theme_mode_toggled, mode)
+            self.theme_mode_buttons[mode] = cb
+            theme_list.append(cb)
+        theme_pop.set_child(theme_list)
+        self.theme_popover = theme_pop
+        theme_menu.set_popover(theme_pop)
+        self._attach_qat(theme_menu, 'theme')
+        theme_box.append(theme_menu)
+        ribbon.append(self._ribbon_group(self.tr('主题', 'Theme'), theme_box))
+        self._update_theme_menu()
         return ribbon
 
     def _build_text_bar(self):
@@ -933,6 +1399,7 @@ class PaintWindow(Gtk.ApplicationWindow):
             b.set_tooltip_text(SHAPE_LABELS_ZH.get(shape, shape) if self.lang_zh else SHAPE_LABELS_EN.get(shape, shape))
             b.set_child(ShapeIcon(shape, 24))
             b.connect('clicked', lambda x, s=shape: self._choose_shape(s))
+            self._attach_qat(b, 'shapes')
             self.shapes_grid.attach(b, i % 5, i // 5, 1, 1)
             self.shape_buttons[shape] = b
         self._update_shape_active()
@@ -998,10 +1465,17 @@ class PaintWindow(Gtk.ApplicationWindow):
         self._update_quick_access()
 
     def _update_quick_access(self):
-        if not hasattr(self, 'btn_undo'):
+        if not hasattr(self, 'qat_buttons'):
             return
-        self.btn_undo.set_sensitive(self.doc.can_undo())
-        self.btn_redo.set_sensitive(self.doc.can_redo())
+        for key, btn in self.qat_buttons.items():
+            if key == 'undo':
+                btn.set_sensitive(self.doc.can_undo())
+            elif key == 'redo':
+                btn.set_sensitive(self.doc.can_redo())
+            elif key in ('cut', 'copy', 'crop'):
+                btn.set_sensitive(self.doc.selection is not None)
+            else:
+                btn.set_sensitive(True)
         if hasattr(self, 'tool_buttons'):
             self._update_shape_active()
 
@@ -1308,7 +1782,7 @@ class PaintWindow(Gtk.ApplicationWindow):
             if name.startswith(self.tr('PNG', 'PNG')):
                 dlg.set_default_filter(f)
         dlg.set_filters(filters)
-        base = os.path.basename(self.doc.filename) if self.doc.filename else '无标题.png'
+        base = os.path.basename(self.doc.filename) if self.doc.filename else (self.tr('无标题', 'Untitled') + '.png')
         dlg.set_initial_name(base)
         dlg.save(self, None, self._on_save_selected)
 
@@ -1807,7 +2281,9 @@ class PaintWindow(Gtk.ApplicationWindow):
             '  Ctrl+A  全选\n  Ctrl+W  调整大小和扭曲\n  Ctrl+E  属性\n'
             '  Ctrl+Shift+X  裁剪\n  Ctrl+Shift+I  反色\n  Ctrl+Shift+N  清除图像\n'
             '  Ctrl+PgUp/Ctrl+PgDn  放大/缩小\n  F11  全屏\n  F1  帮助\n'
-            '  Delete  删除选定内容\n  Esc  取消选择或文本编辑',
+            '  Delete  删除选定内容\n  Esc  取消选择或文本编辑\n\n'
+            '主题：查看 → 主题，可跟随系统或手动选浅色/深色。\n'
+            '快速访问：右键功能区命令即可添加到标题栏。',
             'paim is a lightweight drawing app for Linux built with GTK4.\n\n'
             'Keyboard shortcuts:\n'
             '  Ctrl+N  New\n  Ctrl+O  Open\n  Ctrl+S  Save\n  F12  Save as\n'
@@ -1815,7 +2291,9 @@ class PaintWindow(Gtk.ApplicationWindow):
             '  Ctrl+A  Select all\n  Ctrl+W  Resize and skew\n  Ctrl+E  Properties\n'
             '  Ctrl+Shift+X  Crop\n  Ctrl+Shift+I  Invert colours\n  Ctrl+Shift+N  Clear image\n'
             '  Ctrl+PgUp/Ctrl+PgDn  Zoom in/out\n  F11  Full screen\n  F1  Help\n'
-            '  Delete  Delete selection\n  Esc  Cancel selection or text editing')
+            '  Delete  Delete selection\n  Esc  Cancel selection or text editing\n\n'
+            'Theme: View → Theme, follow the system or choose Light/Dark.\n'
+            'Quick Access: right-click a ribbon command to pin it to the title bar.')
         lab = Gtk.Label(label=text)
         lab.set_wrap(True); lab.set_xalign(0); lab.set_selectable(True)
         box.append(lab)
@@ -1828,23 +2306,13 @@ class PaintWindow(Gtk.ApplicationWindow):
     def _about(self):
         AboutDialog(self).present()
 
-    def _quick_customize(self):
-        MessageDialog(self, self.tr('快速访问工具栏', 'Quick Access Toolbar'),
-                      self.tr('保存、撤消和重做按钮固定在快速访问工具栏上。',
-                              'Save, Undo and Redo are pinned to the Quick Access Toolbar.')).present()
-
     def _update_action_sensitivity(self):
-        if not hasattr(self, 'btn_save'):
-            return
         sel = self.doc.selection is not None
         for a in ('cut', 'copy', 'delete', 'invert-selection', 'crop'):
             act = self.lookup_action(a)
             if act:
                 act.set_enabled(sel)
-        self.btn_save.set_sensitive(True)
-        if hasattr(self, 'btn_undo'):
-            self.btn_undo.set_sensitive(self.doc.can_undo())
-            self.btn_redo.set_sensitive(self.doc.can_redo())
+        self._update_quick_access()
 
     def _build_drop_hint(self):
         self.drop_hint = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -1939,23 +2407,68 @@ class PaintWindow(Gtk.ApplicationWindow):
         self._confirm_save(go)
         return True
 
-    def _on_system_theme_changed(self, *args):
-        dark = detect_dark_theme()
-        if dark == self.dark_mode:
+    def _apply_runtime_theme(self, dark, *, force=False):
+        if self._applying_theme:
             return
-        self.dark_mode = dark
-        icon_module.set_dark_theme(dark)
-        install_css(dark)
-        self.remove_css_class('paint-light')
-        self.remove_css_class('paint-dark')
-        self.add_css_class('paint-dark' if dark else 'paint-light')
-        self.canvas.dark = dark
-        self.canvas.drawing.queue_draw()
-        if hasattr(self, 'hruler'):
-            self.hruler.queue_draw()
-            self.vruler.queue_draw()
-        if hasattr(self, 'thumb_area'):
-            self.thumb_area.queue_draw()
+        if not force and dark == self.dark_mode:
+            return
+        self._applying_theme = True
+        try:
+            apply_native_theme(dark)
+            self.dark_mode = dark
+            icon_module.set_dark_theme(dark)
+            install_css(dark)
+            self.remove_css_class('paint-light')
+            self.remove_css_class('paint-dark')
+            self.add_css_class('paint-dark' if dark else 'paint-light')
+            self.canvas.dark = dark
+            self.canvas.drawing.queue_draw()
+            self.queue_draw()
+            if hasattr(self, 'hruler'):
+                self.hruler.queue_draw()
+                self.vruler.queue_draw()
+            if hasattr(self, 'thumb_area'):
+                self.thumb_area.queue_draw()
+            if hasattr(self, 'theme_mode_label'):
+                self._update_theme_menu()
+        finally:
+            self._applying_theme = False
+
+    def _on_system_theme_changed(self, *args):
+        if self._applying_theme or self.theme_mode != 'auto':
+            return
+        dark = detect_dark_theme()
+        self._apply_runtime_theme(dark)
+
+    def _set_theme_mode(self, mode):
+        if mode not in ('auto', 'light', 'dark'):
+            return
+        self.theme_mode = mode
+        self._save_preferences()
+        self._apply_runtime_theme(self._resolve_dark(), force=True)
+        self._update_theme_menu()
+
+    def _update_theme_menu(self):
+        if not hasattr(self, 'theme_mode_label'):
+            return
+        labels = {
+            'auto': self.tr('主题：跟随系统', 'Theme: System'),
+            'light': self.tr('主题：浅色', 'Theme: Light'),
+            'dark': self.tr('主题：深色', 'Theme: Dark'),
+        }
+        self.theme_mode_label.set_text(labels.get(self.theme_mode, labels['auto']))
+        self._updating_theme_menu = True
+        try:
+            for mode, btn in getattr(self, 'theme_mode_buttons', {}).items():
+                btn.set_active(mode == self.theme_mode)
+        finally:
+            self._updating_theme_menu = False
+
+    def _on_theme_mode_toggled(self, btn, mode):
+        if self._updating_theme_menu:
+            return
+        if btn.get_active():
+            self._set_theme_mode(mode)
 
     def _on_window_key(self, controller, keyval, keycode, state):
         if self.canvas._text_editor is not None:

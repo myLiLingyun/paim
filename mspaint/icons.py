@@ -239,6 +239,18 @@ def draw_icon(ctx, name, size):
         ctx.set_source_rgb(*BLUE)
         _sp(ctx, [(3, 15), (16, 3), (29, 15), (25, 15), (25, 29), (7, 29), (7, 15)], True); ctx.fill()
         ctx.set_source_rgb(*WHITE); ctx.rectangle(13, 19, 6, 10); ctx.fill()
+    elif n == 'theme':
+        ctx.set_source_rgb(*BLUE)
+        ctx.arc(16, 16, 9, 0, 2 * math.pi); ctx.fill()
+        ctx.set_source_rgb(0.11, 0.12, 0.14)
+        ctx.arc(21, 11, 8, 0, 2 * math.pi); ctx.fill()
+        ctx.set_source_rgb(*BLUE)
+        ctx.set_line_width(1.2)
+        for i in range(8):
+            a = i * math.pi / 4
+            ctx.move_to(16 + 12 * math.cos(a), 16 + 12 * math.sin(a))
+            ctx.line_to(16 + 15 * math.cos(a), 16 + 15 * math.sin(a))
+        ctx.stroke()
     elif n == 'grid':
         ctx.set_source_rgb(*BLUE); ctx.set_line_width(1.2)
         for i in range(4):

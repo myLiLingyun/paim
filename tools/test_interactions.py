@@ -31,7 +31,20 @@ def main():
     def run():
         try:
             cv=win.canvas; d=win.doc
-            # pencil
+            # 1 px pencil: a single click must change exactly one pixel
+            cv.set_tool('pencil')
+            cv.line_width = 1
+            win._clear_image()
+            g0=FakeGesture()
+            cv._on_drag_begin(g0, *cv.image_to_view(20.7, 30.3))
+            cv._on_drag_end(g0, 0, 0)
+            changed = 0
+            for yy in range(d.height):
+                for xx in range(d.width):
+                    if pix(d, xx, yy) != (255, 255, 255, 255):
+                        changed += 1
+            check('1px pencil click changes one pixel', changed == 1, f'{changed} pixels')
+            # pencil drag
             cv.set_tool('pencil')
             drag(cv,10,10,100,100)
             check('pencil stroke', pix(d,50,50)[:3] != (255,255,255), str(pix(d,50,50)))

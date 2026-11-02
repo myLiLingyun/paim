@@ -173,6 +173,43 @@ def draw_freehand(ctx, points, color, width, brush='brush', seed=0):
         stroke_segment(ctx, points[i], points[i + 1], color, width, brush, seed=seed + i)
 
 
+def draw_pixel_line(surface: cairo.ImageSurface, x0, y0, x1, y1, color_rgb):
+    """Draw a crisp one-pixel Bresenham line directly into an ARGB32 surface.
+
+    Used by the pencil at 1 px so a click changes exactly the pixel under the
+    pointer and a drag has no anti-aliased fringe.
+    """
+    import math as _math
+    w, h = surface.get_width(), surface.get_height()
+    x0, y0 = int(_math.floor(x0)), int(_math.floor(y0))
+    x1, y1 = int(_math.floor(x1)), int(_math.floor(y1))
+    surface.flush()
+    stride = surface.get_stride()
+    data = surface.get_data()
+    px = (max(0, min(255, int(round(color_rgb[2] * 255)))),
+          max(0, min(255, int(round(color_rgb[1] * 255)))),
+          max(0, min(255, int(round(color_rgb[0] * 255)))), 255)
+    dx = abs(x1 - x0)
+    sx = 1 if x0 < x1 else -1
+    dy = -abs(y1 - y0)
+    sy = 1 if y0 < y1 else -1
+    err = dx + dy
+    while True:
+        if 0 <= x0 < w and 0 <= y0 < h:
+            off = y0 * stride + x0 * 4
+            data[off:off + 4] = bytes(px)
+        if x0 == x1 and y0 == y1:
+            break
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            x0 += sx
+        if e2 <= dx:
+            err += dx
+            y0 += sy
+    surface.mark_dirty()
+
+
 def bucket_fill(surface: cairo.ImageSurface, x: int, y: int, color_rgb, tolerance=0):
     """Scanline flood fill with exact / tolerance matching on ARGB32."""
     w, h = surface.get_width(), surface.get_height()

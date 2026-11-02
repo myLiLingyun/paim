@@ -28,12 +28,17 @@ cd paim
 ./install.sh
 ```
 
-安装脚本会把启动器链接到 `~/.local/bin/paim`，并安装图标和桌面入口。
-确保 `~/.local/bin` 在 `PATH` 中，然后运行：
+安装脚本会把启动器链接到 `~/.local/bin/paim`，并安装图标和桌面入口；安装出来的桌面入口会写入绝对 `Exec` 路径，因此不依赖图形会话的 `PATH`。
+
+如果希望在终端里直接运行，可把 `~/.local/bin` 加入 `PATH`，然后执行：
 
 ```bash
 paim
 ```
+
+界面语言跟随系统 locale（`LANGUAGE` / `LC_ALL` / `LC_MESSAGES` / `LANG`）。调试或强制语言时可设置 `PAIM_LANG=zh` 或 `PAIM_LANG=en`。
+
+主题和快速访问工具栏配置保存在 `~/.config/paim/settings.json`。
 
 也可以不安装，直接从项目目录运行：
 
@@ -55,10 +60,12 @@ python3 -m mspaint
 - **颜色**：20 色经典调色板、颜色 1/颜色 2、完整颜色选择器
 - **文件**：新建、打开、保存、另存为、最近文件
 - **拖放**：从文件管理器把图片拖到 paim 窗口即可打开，带拖放高亮提示
+- **快速访问工具栏**：右键 Ribbon 命令可添加到标题栏，也可从下拉菜单自定义并持久保存
+- **双语界面**：根据系统语言自动使用中文或英文
 - **格式**：PNG、JPEG、BMP（1/4/8/24 位）、GIF、DIB，以及 Pillow 支持的其他图片
 - **打印**：打印、打印预览、页面设置
 - **视图**：10%–800% 缩放、标尺、网格线、缩略图、全屏、状态栏
-- **主题**：自动跟随系统深色/浅色主题，画布保持白色
+- **主题**：应用内可选“跟随系统 / 浅色 / 深色”，选择持久保存；画布保持白色
 - **桌面集成**：设为桌面背景、邮件发送、最近文件列表
 - **编辑**：50 步撤消/重做、快捷键
 
@@ -90,6 +97,8 @@ xvfb-run -a python3 tools/test_interactions.py
 xvfb-run -a python3 tools/test_dialogs.py
 xvfb-run -a python3 tools/smoke_test.py
 xvfb-run -a python3 tools/test_drop.py
+xvfb-run -a env XDG_CONFIG_HOME=$(mktemp -d) python3 tools/test_features.py
+xvfb-run -a python3 tools/test_i18n.py
 ```
 
 ## 代码结构
