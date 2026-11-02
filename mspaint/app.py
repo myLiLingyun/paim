@@ -32,7 +32,7 @@ from .raster import (BRUSH_LABELS, BRUSH_ORDER, DEFAULT_PALETTE, LINE_WIDTHS,
 from .shapes import (GALLERY_ROWS, SHAPE_LABELS_EN, SHAPE_LABELS_ZH,
                      SHAPE_ORDER, build_shape_path)
 from .text import text_extents
-from .view import PaintCanvas
+from .view import PaintCanvas, checker_pattern
 
 
 APP_ID = 'io.github.paim.PaintImproved'
@@ -1773,7 +1773,10 @@ class PaintWindow(Gtk.ApplicationWindow):
             (self.tr('JPEG 图片', 'JPEG picture'), ['*.jpg', '*.jpeg']),
             (self.tr('BMP 图片', 'BMP picture'), ['*.bmp', '*.dib']),
             (self.tr('GIF 图片', 'GIF picture'), ['*.gif']),
-            (self.tr('所有图片文件', 'All picture files'), ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.gif']),
+            (self.tr('WebP 图片', 'WebP picture'), ['*.webp']),
+            (self.tr('TIFF 图片', 'TIFF picture'), ['*.tif', '*.tiff']),
+            (self.tr('所有图片文件', 'All picture files'),
+             ['*.png', '*.jpg', '*.jpeg', '*.bmp', '*.gif', '*.webp', '*.tif', '*.tiff']),
         ]:
             f = Gtk.FileFilter(); f.set_name(name)
             for pat in patterns:
@@ -2069,18 +2072,27 @@ class PaintWindow(Gtk.ApplicationWindow):
 
     def _properties(self):
         def apply(w, h, color, transparent):
+            self._commit_current_text()
+            self.canvas.commit_floating()
             if w != self.doc.width or h != self.doc.height:
                 self.doc.resize_canvas(w, h)
             if not color:
                 self._to_black_white()
+            if transparent != self.doc.transparent:
+                # Enabling transparency punches out the current background
+                # colour; disabling composites the image over it again.
+                self.doc.set_transparency(transparent)
             self.canvas.update_after_image_change()
             self._update_title()
+            self._update_action_sensitivity()
         AttributesDialog(self, self.doc, apply).present()
 
     def _to_black_white(self):
-        from PIL import Image
-        img = self.doc.to_pil(with_alpha=False).convert('1').convert('RGB')
         from .document import pil_to_surface
+        img = self.doc.to_pil(with_alpha=True)
+        alpha = img.getchannel('A')
+        img = img.convert('L').convert('RGB')
+        img.putalpha(alpha)
         self.doc.push_undo('转换为黑白')
         self.doc.surface = pil_to_surface(img)
         self.doc.dirty = True
@@ -2166,6 +2178,13 @@ class PaintWindow(Gtk.ApplicationWindow):
         x = (width - w * scale) / 2
         y = (height - h * scale) / 2
         ctx.save()
+        ctx.rectangle(x, y, w * scale, h * scale)
+        ctx.clip()
+        ctx.translate(x, y)
+        ctx.set_source(checker_pattern(self.dark_mode, 6))
+        ctx.paint()
+        ctx.restore()
+        ctx.save()
         ctx.translate(x, y); ctx.scale(scale, scale)
         ctx.set_source_surface(self.doc.surface, 0, 0)
         ctx.paint()
@@ -2236,7 +2255,7 @@ class PaintWindow(Gtk.ApplicationWindow):
         try:
             path = Path(GLib.get_user_data_dir()) / 'mspaint-linux' / 'wallpaper.png'
             path.parent.mkdir(parents=True, exist_ok=True)
-            self.doc.save(str(path), fmt='png')
+            self.doc.save(str(path), fmt='png', with_alpha=False)
             uri = path.as_uri()
             for key in ('picture-uri', 'picture-uri-dark'):
                 subprocess.run(['gsettings', 'set', 'org.gnome.desktop.background', key, uri],

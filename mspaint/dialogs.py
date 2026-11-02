@@ -182,8 +182,13 @@ class AttributesDialog(BaseDialog):
         box.append(self.color); box.append(self.bw)
         grid.attach(box, 1, 3, 1, 1)
         self.transparent = Gtk.CheckButton(label=tr('透明', 'Transparent'))
-        self.transparent.set_active(False)
+        self.transparent.set_tooltip_text(tr('透明背景（保留 Alpha 通道）',
+                                             'Transparent background (preserve the alpha channel)'))
+        self.transparent.set_active(bool(getattr(doc, 'transparent', False)))
         grid.attach(self.transparent, 0, 4, 2, 1)
+        self.content.append(label(tr('透明背景会保留 PNG、GIF 和 WebP 文件的透明通道。',
+                                     'A transparent background is preserved in PNG, GIF and WebP files.'),
+                                  css='hint', wrap=True))
         self.content.append(label(tr('注意：将图像转换为黑白后无法撤销。',
                                      'Note: converting the image to black and white cannot be undone.'),
                                   css='hint'))

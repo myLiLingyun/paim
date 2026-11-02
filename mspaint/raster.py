@@ -210,7 +210,8 @@ def draw_pixel_line(surface: cairo.ImageSurface, x0, y0, x1, y1, color_rgb):
     surface.mark_dirty()
 
 
-def bucket_fill(surface: cairo.ImageSurface, x: int, y: int, color_rgb, tolerance=0):
+def bucket_fill(surface: cairo.ImageSurface, x: int, y: int, color_rgb, tolerance=0,
+                alpha=1.0):
     """Scanline flood fill with exact / tolerance matching on ARGB32."""
     w, h = surface.get_width(), surface.get_height()
     if x < 0 or y < 0 or x >= w or y >= h:
@@ -219,8 +220,12 @@ def bucket_fill(surface: cairo.ImageSurface, x: int, y: int, color_rgb, toleranc
     stride = surface.get_stride()
     data = surface.get_data()
     target = tuple(data[y * stride + x * 4:y * stride + x * 4 + 4])
-    new = (int(color_rgb[2] * 255 + 0.5), int(color_rgb[1] * 255 + 0.5),
-           int(color_rgb[0] * 255 + 0.5), 255)
+    a = max(0, min(255, int(round(alpha * 255))))
+    # Cairo stores premultiplied BGRA data.
+    new = (int(color_rgb[2] * 255 + 0.5) * a // 255,
+           int(color_rgb[1] * 255 + 0.5) * a // 255,
+           int(color_rgb[0] * 255 + 0.5) * a // 255,
+           a)
     if target == new:
         return False
 
@@ -399,9 +404,17 @@ def draw_curve(ctx, p0, p1, c1, c2, color, width, outline_style='solid', alpha=1
     ctx.restore()
 
 
-def draw_eraser(ctx, x, y, size, color):
+def draw_eraser(ctx, x, y, size, color, clear=False):
     ctx.save()
-    ctx.set_source_rgba(*color, 1)
+    rgba = tuple(color)
+    if len(rgba) == 3:
+        rgba = rgba + (1.0,)
+    if clear or rgba[3] <= 0:
+        # Erase to full transparency instead of painting the background colour.
+        ctx.set_operator(cairo.OPERATOR_CLEAR)
+        ctx.set_source_rgba(0, 0, 0, 0)
+    else:
+        ctx.set_source_rgba(*rgba)
     ctx.rectangle(round(x - size / 2), round(y - size / 2), size, size)
     ctx.fill()
     ctx.restore()
@@ -416,4 +429,11 @@ def pick_color(surface, x, y):
     data = surface.get_data()
     off = int(y) * stride + int(x) * 4
     b, g, r, a = data[off], data[off + 1], data[off + 2], data[off + 3]
+    if 0 < a < 255:
+        # Return the straight (un-premultiplied) colour and its alpha.
+        r = min(255, (r * 255 + a // 2) // a)
+        g = min(255, (g * 255 + a // 2) // a)
+        b = min(255, (b * 255 + a // 2) // a)
+    elif a == 0:
+        return (0, 0, 0, 0)
     return (r, g, b, a)

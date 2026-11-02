@@ -21,10 +21,25 @@ def _copy_surface(surface: cairo.ImageSurface) -> cairo.ImageSurface:
     return out
 
 
+def normalize_rgba(color) -> tuple[float, float, float, float]:
+    """Return a Cairo-friendly RGBA tuple, accepting RGB or RGBA input."""
+    values = tuple(float(v) for v in color)
+    if len(values) == 3:
+        values += (1.0,)
+    if len(values) < 3:
+        values = (0.0, 0.0, 0.0, 1.0)
+    return tuple(max(0.0, min(1.0, v)) for v in values[:4])  # type: ignore[return-value]
+
+
+def is_transparent_color(color) -> bool:
+    values = normalize_rgba(color)
+    return values[3] <= 0.0
+
+
 def new_surface(width: int, height: int, color=(1, 1, 1, 1)) -> cairo.ImageSurface:
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, max(1, int(width)), max(1, int(height)))
     ctx = cairo.Context(surface)
-    ctx.set_source_rgba(*color)
+    ctx.set_source_rgba(*normalize_rgba(color))
     ctx.paint()
     return surface
 
@@ -33,9 +48,64 @@ def clear_surface(surface: cairo.ImageSurface, color=(1, 1, 1, 1)) -> None:
     ctx = cairo.Context(surface)
     ctx.save()
     ctx.set_operator(cairo.OPERATOR_SOURCE)
-    ctx.set_source_rgba(*color)
+    ctx.set_source_rgba(*normalize_rgba(color))
     ctx.paint()
     ctx.restore()
+
+
+def surface_has_transparency(surface: cairo.ImageSurface, threshold: int = 254) -> bool:
+    """Return True when any pixel in *surface* has alpha below *threshold*."""
+    surface.flush()
+    width, height = surface.get_width(), surface.get_height()
+    stride = surface.get_stride()
+    data = surface.get_data()
+    if stride == width * 4:
+        # Fast path: walk a single contiguous byte array.
+        for off in range(3, len(data), 4):
+            if data[off] <= threshold:
+                return True
+    else:
+        for y in range(height):
+            off = y * stride + 3
+            end = off + width * 4
+            while off < end:
+                if data[off] <= threshold:
+                    return True
+                off += 4
+    return False
+
+
+surface_has_alpha = surface_has_transparency
+
+
+def pil_has_transparency(im: Image.Image) -> bool:
+    """Return True if a Pillow image has an alpha channel/key with real alpha."""
+    if im.mode in ('RGBA', 'LA', 'PA') or 'A' in im.getbands():
+        try:
+            alpha = im.getchannel('A')
+            low, _high = alpha.getextrema()
+            return low < 255
+        except Exception:
+            return True
+    info = getattr(im, 'info', {}) or {}
+    if info.get('transparency') is not None:
+        # Palette/index transparency is meaningful even without an A band.
+        return im.mode in ('P', 'L', 'RGB', '1')
+    return False
+
+
+image_has_transparency = pil_has_transparency
+
+
+def _flatten_pil_on_color(im: Image.Image, color=(255, 255, 255)) -> Image.Image:
+    """Composite a Pillow image over an opaque colour and return RGB."""
+    rgba = im.convert('RGBA')
+    values = list(color[:3])
+    if any(isinstance(v, float) and v <= 1.0 for v in values):
+        values = [round(v * 255) for v in values]
+    values = [max(0, min(255, int(round(v)))) for v in values]
+    background = Image.new('RGBA', rgba.size, tuple(values) + (255,))
+    return Image.alpha_composite(background, rgba).convert('RGB')
 
 
 def rgb_to_float(rgb) -> tuple[float, float, float]:
@@ -163,17 +233,21 @@ class Snapshot:
     height: int
     selection: Selection | None
     label: str = ''
+    background: tuple = (1.0, 1.0, 1.0, 1.0)
 
 
 class Document:
     """A Paint document with undo/redo and selection operations."""
 
-    def __init__(self, width=768, height=432, *, background=(1, 1, 1, 1), dpi=96):
+    def __init__(self, width=768, height=432, *, background=(1, 1, 1, 1), dpi=96,
+                 transparent=False):
         self.width = int(width)
         self.height = int(height)
         self.dpi = dpi
-        self.background = background
-        self.surface = new_surface(self.width, self.height, background)
+        self.background = normalize_rgba(background)
+        if transparent:
+            self.background = self.background[:3] + (0.0,)
+        self.surface = new_surface(self.width, self.height, self.background)
         self.filename: str | None = None
         self.format: str | None = None
         self.dirty = False
@@ -181,14 +255,57 @@ class Document:
         self.undo_stack: list[Snapshot] = []
         self.redo_stack: list[Snapshot] = []
         self.max_undo = 50
-        self.metadata: dict = {}
+        self.metadata: dict = {'transparent': self.transparent}
         self.palette: list[str] = []
+
+    # ------------------------------------------------------------------
+    # Transparency state
+    @property
+    def transparent(self) -> bool:
+        """Whether new/cleared pixels use a transparent background."""
+        return self.background[3] <= 0.0
+
+    @transparent.setter
+    def transparent(self, value: bool) -> None:
+        value = bool(value)
+        if hasattr(self, 'surface'):
+            if value != self.transparent:
+                self.set_transparency(value)
+            return
+        r, g, b, _a = self.background
+        self.background = (r, g, b, 0.0 if value else 1.0)
+
+    @property
+    def is_transparent(self) -> bool:
+        return self.transparent
+
+    @is_transparent.setter
+    def is_transparent(self, value: bool) -> None:
+        self.transparent = value
+
+    @property
+    def transparent_background(self) -> bool:
+        return self.transparent
+
+    @transparent_background.setter
+    def transparent_background(self, value: bool) -> None:
+        self.transparent = value
+
+    @property
+    def has_alpha(self) -> bool:
+        """Whether the image currently contains any non-opaque pixels."""
+        return self.transparent or surface_has_transparency(self.surface)
+
+    @property
+    def has_transparency(self) -> bool:
+        return self.has_alpha
 
     # ------------------------------------------------------------------
     # History
     def snapshot(self, label='') -> Snapshot:
         return Snapshot(_copy_surface(self.surface), self.width, self.height,
-                        self.selection.clone() if self.selection else None, label)
+                        self.selection.clone() if self.selection else None, label,
+                        self.background)
 
     def push_undo(self, label='') -> None:
         self.undo_stack.append(self.snapshot(label))
@@ -227,6 +344,83 @@ class Document:
         self.surface = _copy_surface(snap.surface)
         self.width, self.height = snap.width, snap.height
         self.selection = snap.selection.clone() if snap.selection else None
+        self.background = normalize_rgba(snap.background)
+        self.metadata['transparent'] = self.transparent
+
+    # ------------------------------------------------------------------
+    # Transparency operations
+    def _make_color_transparent(self, color: tuple[float, float, float], tolerance: int = 0) -> None:
+        """Turn opaque pixels matching *color* into fully transparent pixels."""
+        self.surface.flush()
+        width, height = self.surface.get_width(), self.surface.get_height()
+        stride = self.surface.get_stride()
+        data = self.surface.get_data()
+        target = tuple(int(round(v * 255)) for v in color[:3])
+        for y in range(height):
+            base = y * stride
+            for x in range(width):
+                off = base + x * 4
+                alpha = data[off + 3]
+                if alpha == 0:
+                    continue
+                if alpha == 255:
+                    r, g, b = data[off + 2], data[off + 1], data[off]
+                else:
+                    # Compare straight (un-premultiplied) colours so the
+                    # anti-aliased fringe around letters and shapes disappears
+                    # together with the background.
+                    r = min(255, (data[off + 2] * 255 + alpha // 2) // alpha)
+                    g = min(255, (data[off + 1] * 255 + alpha // 2) // alpha)
+                    b = min(255, (data[off] * 255 + alpha // 2) // alpha)
+                if (abs(r - target[0]) <= tolerance
+                        and abs(g - target[1]) <= tolerance
+                        and abs(b - target[2]) <= tolerance):
+                    data[off] = data[off + 1] = data[off + 2] = data[off + 3] = 0
+        self.surface.mark_dirty()
+
+    def flatten_alpha(self, color=None) -> None:
+        """Composite the image over an opaque background colour."""
+        if color is None:
+            r, g, b, _a = self.background
+            color = (r, g, b, 1.0)
+        color = normalize_rgba(color)
+        if color[3] <= 0:
+            return
+        out = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.width, self.height)
+        ctx = cairo.Context(out)
+        ctx.set_source_rgba(*color)
+        ctx.paint()
+        ctx.set_source_surface(self.surface, 0, 0)
+        ctx.paint()
+        self.surface = out
+        self.dirty = True
+
+    def set_transparency(self, enabled: bool, *, background=None, clear=True,
+                         label='透明背景') -> bool:
+        """Enable/disable a transparent background.
+
+        When enabling, opaque pixels matching the current background colour are
+        punched out (so clearing a white canvas produces a transparent image).
+        Disabling composites the image over an opaque background.
+        """
+        enabled = bool(enabled)
+        if enabled == self.transparent:
+            return False
+        self.push_undo(label)
+        if enabled:
+            old = self.background
+            target_rgb = (old[0], old[1], old[2])
+            self.background = target_rgb + (0.0,)
+            if clear:
+                self._make_color_transparent(target_rgb)
+        else:
+            self.background = self.background[:3] + (1.0,)
+            if background is not None:
+                self.background = normalize_rgba(background)
+            self.flatten_alpha(self.background)
+        self.metadata['transparent'] = self.transparent
+        self.dirty = True
+        return True
 
     # ------------------------------------------------------------------
     # Geometry and whole-image operations
@@ -301,9 +495,15 @@ class Document:
                 piece = crop
             nsw, nsh = max(1, round(new_w)), max(1, round(new_h))
             ctx = cairo.Context(full)
-            ctx.set_operator(cairo.OPERATOR_CLEAR)
-            ctx.rectangle(sx, sy, sw, sh)
-            ctx.fill()
+            if self.transparent:
+                ctx.set_operator(cairo.OPERATOR_CLEAR)
+                ctx.rectangle(sx, sy, sw, sh)
+                ctx.fill()
+            else:
+                ctx.set_operator(cairo.OPERATOR_SOURCE)
+                ctx.set_source_rgba(*self.background)
+                ctx.rectangle(sx, sy, sw, sh)
+                ctx.fill()
             ctx.set_operator(cairo.OPERATOR_OVER)
             ctx.save()
             ctx.rectangle(sx, sy, nsw, nsh)
@@ -372,9 +572,15 @@ class Document:
             tw, th = transformed.get_width(), transformed.get_height()
             ctx = cairo.Context(self.surface)
             ctx.save()
-            ctx.set_operator(cairo.OPERATOR_CLEAR)
-            ctx.rectangle(x, y, w, h)
-            ctx.fill()
+            if self.transparent:
+                ctx.set_operator(cairo.OPERATOR_CLEAR)
+                ctx.rectangle(x, y, w, h)
+                ctx.fill()
+            else:
+                ctx.set_operator(cairo.OPERATOR_SOURCE)
+                ctx.set_source_rgba(*self.background)
+                ctx.rectangle(x, y, w, h)
+                ctx.fill()
             ctx.restore()
             if self.selection.polygon or self.selection.inverted:
                 mask = sel.mask_surface(self.width, self.height)
@@ -430,6 +636,9 @@ class Document:
         nh = int(math.ceil(self.height + extra_h))
         out = cairo.ImageSurface(cairo.FORMAT_ARGB32, nw, nh)
         ctx = cairo.Context(out)
+        if not self.transparent:
+            ctx.set_source_rgba(*self.background)
+            ctx.paint()
         # translate so all content remains visible
         if hx >= 0:
             ctx.translate(0, extra_h if vy >= 0 else 0)
@@ -459,9 +668,9 @@ class Document:
         self.surface = _copy_surface(out)
         self.dirty = True
 
-    def clear_image(self, color=(1, 1, 1, 1)):
+    def clear_image(self, color=None):
         self.push_undo('清除图像')
-        clear_surface(self.surface, color)
+        clear_surface(self.surface, self.background if color is None else color)
         self.selection = None
         self.dirty = True
 
@@ -517,7 +726,7 @@ class Document:
             ctx.paint()
         return surface
 
-    def delete_selection(self, background=(1, 1, 1, 1)):
+    def delete_selection(self, background=None):
         sel = self.selection
         if not sel:
             return False
@@ -527,19 +736,31 @@ class Document:
             self.selection = None
             self.dirty = True
             return True
+        if background is None:
+            background = self.background
+        background = normalize_rgba(background)
         self.push_undo('删除')
         ctx = cairo.Context(self.surface)
         if sel.inverted or sel.polygon:
             mask = sel.mask_surface(self.width, self.height)
-            group = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.width, self.height)
-            gctx = cairo.Context(group)
-            gctx.set_source_rgba(*background)
-            gctx.paint()
-            gctx.set_operator(cairo.OPERATOR_DEST_IN)
-            gctx.set_source_surface(mask, 0, 0)
-            gctx.paint()
-            ctx.set_source_surface(group, 0, 0)
-            ctx.paint()
+            if background[3] <= 0:
+                # DEST_OUT is the only reliable way to punch a transparent
+                # hole through an arbitrary (polygon/inverted) mask.
+                ctx.save()
+                ctx.set_operator(cairo.OPERATOR_DEST_OUT)
+                ctx.set_source_surface(mask, 0, 0)
+                ctx.paint()
+                ctx.restore()
+            else:
+                group = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.width, self.height)
+                gctx = cairo.Context(group)
+                gctx.set_source_rgba(*background)
+                gctx.paint()
+                gctx.set_operator(cairo.OPERATOR_DEST_IN)
+                gctx.set_source_surface(mask, 0, 0)
+                gctx.paint()
+                ctx.set_source_surface(group, 0, 0)
+                ctx.paint()
         else:
             x, y, w, h = sel.rect
             ctx.set_operator(cairo.OPERATOR_SOURCE)
@@ -581,16 +802,23 @@ class Document:
         ctx.save()
         if sel.inverted or sel.polygon:
             mask = sel.mask_surface(self.width, self.height)
-            cutter = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.width, self.height)
-            cctx = cairo.Context(cutter)
-            cctx.set_source_rgba(*self.background)
-            cctx.paint()
-            cctx.set_operator(cairo.OPERATOR_DEST_IN)
-            cctx.set_source_surface(mask, 0, 0)
-            cctx.paint()
-            ctx.set_operator(cairo.OPERATOR_SOURCE)
-            ctx.set_source_surface(cutter, 0, 0)
-            ctx.paint()
+            if self.background[3] <= 0:
+                # Remove precisely the selected shape without touching the
+                # rest of the image.
+                ctx.set_operator(cairo.OPERATOR_DEST_OUT)
+                ctx.set_source_surface(mask, 0, 0)
+                ctx.paint()
+            else:
+                # Paint the background colour only through the selection mask.
+                cutter = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.width, self.height)
+                cctx = cairo.Context(cutter)
+                cctx.set_source_rgba(*self.background)
+                cctx.paint()
+                cctx.set_operator(cairo.OPERATOR_DEST_IN)
+                cctx.set_source_surface(mask, 0, 0)
+                cctx.paint()
+                ctx.set_source_surface(cutter, 0, 0)
+                ctx.paint()
         else:
             ctx.set_operator(cairo.OPERATOR_SOURCE)
             ctx.set_source_rgba(*self.background)
@@ -608,18 +836,25 @@ class Document:
         with Image.open(path) as im:
             im.load()
             im = ImageOps.exif_transpose(im)
+            transparent = pil_has_transparency(im)
             if im.mode not in ('RGBA', 'RGB', 'L', 'P', 'LA'):
                 im = im.convert('RGBA')
             width, height = im.size
-            doc = cls(width, height)
+            background = (1.0, 1.0, 1.0, 0.0) if transparent else (1.0, 1.0, 1.0, 1.0)
+            doc = cls(width, height, background=background)
             doc.surface = pil_to_surface(im)
             doc.filename = path
             doc.format = os.path.splitext(path)[1].lower().lstrip('.')
             doc.dirty = False
             doc.selection = None
             doc.undo_stack.clear(); doc.redo_stack.clear()
-            doc.metadata['dpi'] = im.info.get('dpi', (96, 96))[0] or 96
-            doc.dpi = int(round(doc.metadata['dpi']))
+            try:
+                dpi = im.info.get('dpi', (96, 96))[0] or 96
+            except Exception:
+                dpi = 96
+            doc.metadata['dpi'] = dpi
+            doc.metadata['transparent'] = transparent
+            doc.dpi = int(round(dpi))
             return doc
 
     def to_pil(self, *, with_alpha=False):
@@ -632,17 +867,19 @@ class Document:
         fmt = (fmt or os.path.splitext(path)[1].lstrip('.') or self.format or 'png').lower()
         if fmt == 'jpeg':
             fmt = 'jpg'
-        img = self.to_pil(with_alpha=(fmt in ('png', 'gif', 'webp')))
-        if fmt in ('jpg', 'jpeg'):
+        alpha_formats = ('png', 'gif', 'webp', 'tif', 'tiff')
+        with_alpha = bool(options.get('with_alpha', fmt in alpha_formats))
+        img = self.to_pil(with_alpha=with_alpha)
+        if fmt == 'jpg':
             if img.mode == 'RGBA':
-                bg = Image.new('RGB', img.size, '#ffffff')
-                bg.paste(img, mask=img.getchannel('A'))
-                img = bg
+                img = _flatten_pil_on_color(img, options.get('background', (255, 255, 255)))
             else:
                 img = img.convert('RGB')
             img.save(path, 'JPEG', quality=options.get('quality', 92))
         elif fmt == 'bmp':
             bits = int(options.get('bits', 24))
+            if img.mode == 'RGBA':
+                img = _flatten_pil_on_color(img, options.get('background', (255, 255, 255)))
             if bits == 1:
                 img = img.convert('1')
             elif bits == 4:
@@ -656,12 +893,26 @@ class Document:
                 img = img.convert('RGB')
             img.save(path, 'BMP')
         elif fmt == 'dib':
+            if img.mode == 'RGBA':
+                img = _flatten_pil_on_color(img, options.get('background', (255, 255, 255)))
             img.save(path, 'BMP')
         elif fmt == 'gif':
-            img.save(path, 'GIF', transparency=options.get('transparency'))
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+            _save_gif_with_alpha(img, path)
         elif fmt == 'png':
+            if not with_alpha and img.mode == 'RGBA':
+                img = _flatten_pil_on_color(img, options.get('background', (255, 255, 255)))
             img.save(path, 'PNG', dpi=(self.dpi, self.dpi))
+        elif fmt in ('webp', 'tif', 'tiff'):
+            fmt_name = 'WEBP' if fmt == 'webp' else 'TIFF'
+            kwargs = {}
+            if fmt == 'webp':
+                kwargs['lossless'] = bool(options.get('lossless', True))
+                kwargs['quality'] = options.get('quality', 95)
+            img.save(path, fmt_name, **kwargs)
         else:
+            # Let Pillow infer from the extension for less common formats.
             img.save(path)
         self.filename = path
         self.format = fmt
@@ -669,7 +920,7 @@ class Document:
         return path
 
     def duplicate(self) -> 'Document':
-        doc = Document(self.width, self.height)
+        doc = Document(self.width, self.height, background=self.background)
         doc.surface = _copy_surface(self.surface)
         doc.filename = self.filename
         doc.format = self.format
@@ -687,20 +938,40 @@ def surface_to_pil(surface: cairo.ImageSurface, *, with_alpha=False) -> Image.Im
     stride = surface.get_stride()
     # Cairo's ARGB32 is native-endian, premultiplied BGRA on x86.
     raw = bytes(surface.get_data())
-    mode = 'RGBA' if with_alpha else 'RGB'
     im = Image.frombuffer('RGBA', (w, h), raw, 'raw', 'BGRA', stride, 1)
-    if not with_alpha:
-        # Canvas is normally opaque; this branch safely drops alpha.
-        return im.convert('RGB')
     pixels = bytearray(im.tobytes())
-    # Un-premultiply only where needed.
+    # Un-premultiply so saved files use straight alpha.
     for i in range(0, len(pixels), 4):
         a = pixels[i + 3]
         if 0 < a < 255:
             pixels[i] = min(255, (pixels[i] * 255 + a // 2) // a)
             pixels[i + 1] = min(255, (pixels[i + 1] * 255 + a // 2) // a)
             pixels[i + 2] = min(255, (pixels[i + 2] * 255 + a // 2) // a)
-    return Image.frombytes('RGBA', (w, h), bytes(pixels))
+        elif a == 0:
+            pixels[i] = pixels[i + 1] = pixels[i + 2] = 0
+    im = Image.frombytes('RGBA', (w, h), bytes(pixels))
+    if with_alpha:
+        return im
+    # Formats without alpha (JPEG/BMP/printing) should see the image on an
+    # opaque white background instead of black/undefined transparent pixels.
+    return _flatten_pil_on_color(im, (255, 255, 255))
+
+
+def _save_gif_with_alpha(im: Image.Image, path: str) -> None:
+    """Save an RGBA image as a GIF, preserving binary transparency."""
+    if im.mode != 'RGBA':
+        im = im.convert('RGBA')
+    alpha = im.getchannel('A')
+    rgb = im.convert('RGB')
+    palette = rgb.convert('P', palette=Image.Palette.ADAPTIVE, colors=255)
+    transparent_mask = alpha.point(lambda a: 255 if a < 128 else 0)
+    if transparent_mask.getbbox() is None:
+        palette.save(path, 'GIF')
+        return
+    # Reserve palette index 255 for fully transparent pixels.
+    palette.paste(255, mask=transparent_mask)
+    palette.info['transparency'] = 255
+    palette.save(path, 'GIF', transparency=255)
 
 
 def pil_to_surface(im: Image.Image) -> cairo.ImageSurface:

@@ -20,6 +20,33 @@ from .text import draw_text
 
 PAD = 12
 
+_CHECKER_CACHE: dict[tuple[bool, int], cairo.SurfacePattern] = {}
+
+
+def checker_pattern(dark: bool = False, cell: int = 8) -> cairo.SurfacePattern:
+    """A repeating checkerboard pattern used behind transparent pixels."""
+    key = (bool(dark), int(cell))
+    pattern = _CHECKER_CACHE.get(key)
+    if pattern is None:
+        cell = max(2, int(cell))
+        tile = cairo.ImageSurface(cairo.FORMAT_ARGB32, cell * 2, cell * 2)
+        ctx = cairo.Context(tile)
+        if dark:
+            light, shade = (0.30, 0.31, 0.34), (0.22, 0.23, 0.26)
+        else:
+            light, shade = (1.0, 1.0, 1.0), (0.82, 0.82, 0.82)
+        ctx.set_source_rgb(*light)
+        ctx.paint()
+        ctx.set_source_rgb(*shade)
+        ctx.rectangle(0, 0, cell, cell)
+        ctx.fill()
+        ctx.rectangle(cell, cell, cell, cell)
+        ctx.fill()
+        pattern = cairo.SurfacePattern(tile)
+        pattern.set_extend(cairo.EXTEND_REPEAT)
+        _CHECKER_CACHE[key] = pattern
+    return pattern
+
 
 class PaintCanvas(Gtk.Overlay):
     """Canvas, input handling, selection overlay and text editing."""
@@ -259,8 +286,13 @@ class PaintCanvas(Gtk.Overlay):
         ctx.save()
         ctx.rectangle(ox, oy, iw, ih)
         ctx.clip()
-        ctx.set_source_rgb(1, 1, 1)
+        # A checkerboard makes transparent pixels distinguishable from white
+        # pixels.  Opaque images cover it completely.
+        ctx.save()
+        ctx.translate(ox, oy)
+        ctx.set_source(checker_pattern(self.dark))
         ctx.paint()
+        ctx.restore()
         ctx.translate(ox, oy)
         ctx.scale(z, z)
         pattern = cairo.SurfacePattern(self.doc.surface)
@@ -552,7 +584,9 @@ class PaintCanvas(Gtk.Overlay):
         color = tuple(v / 255 for v in (self.color2 if self._button == 3 else self.color1))
         if self.tool == 'eraser':
             size = max(4, self.line_width * 2)
-            draw_eraser(ctx, ix, iy, size, tuple(v / 255 for v in self.color2))
+            draw_eraser(ctx, ix, iy, size,
+                        tuple(v / 255 for v in self.color2),
+                        clear=self.doc.transparent)
         elif self.tool == 'pencil':
             if self.line_width <= 1:
                 draw_pixel_line(self.doc.surface, ix, iy, ix, iy, color)
@@ -711,7 +745,8 @@ class PaintCanvas(Gtk.Overlay):
                 t = i / steps
                 draw_eraser(ctx, last[0] + (ix - last[0]) * t,
                             last[1] + (iy - last[1]) * t, size,
-                            tuple(v / 255 for v in self.color2))
+                            tuple(v / 255 for v in self.color2),
+                            clear=self.doc.transparent)
         elif self.tool == 'pencil':
             if self.line_width <= 1:
                 draw_pixel_line(self.doc.surface, last[0], last[1], ix, iy, color)
@@ -730,6 +765,16 @@ class PaintCanvas(Gtk.Overlay):
         if self._points:
             self._notify_modified()
         self._points = []
+
+    def _delete_background(self):
+        """Colour used when clearing a selection.
+
+        Transparent images must keep their alpha channel; opaque images keep
+        Paint's classic "fill with Colour 2" behaviour.
+        """
+        if self.doc.transparent:
+            return (1.0, 1.0, 1.0, 0.0)
+        return tuple(v / 255 for v in self.color2)
 
     def _do_fill(self, ix, iy):
         self.doc.push_undo('用颜色填充')
@@ -753,6 +798,7 @@ class PaintCanvas(Gtk.Overlay):
         if handle:
             if sel.floating is None:
                 self.doc.lift_selection()
+                self._transparentize_floating()
             self._mode = 'resize_selection'
             self._resize_handle = handle
             self._resize_rect0 = (sel.x, sel.y, sel.w, sel.h)
@@ -764,6 +810,7 @@ class PaintCanvas(Gtk.Overlay):
             # Move the selected content.
             if sel.floating is None:
                 self.doc.lift_selection()
+                self._transparentize_floating()
             self._mode = 'move'
             self._move_origin = sel.floating_origin or sel.rect[:2]
             self._move_start = (ix, iy)
@@ -1008,7 +1055,7 @@ class PaintCanvas(Gtk.Overlay):
             return True
         if keyval in (Gdk.KEY_Delete, Gdk.KEY_BackSpace):
             if self.doc.selection is not None:
-                self.doc.delete_selection(tuple(v / 255 for v in self.color2))
+                self.doc.delete_selection(self._delete_background())
                 self._notify_selection(); self._notify_modified(); self.drawing.queue_draw()
                 return True
         if self.doc.selection and self.doc.selection.floating is not None and keyval in (
@@ -1027,20 +1074,34 @@ class PaintCanvas(Gtk.Overlay):
 
     # ------------------------------------------------------------------
     # Clipboard / selection API
+    def _apply_transparent_selection(self, surface):
+        """Drop Colour 2 pixels when Paint's transparent-selection mode is on."""
+        if surface is None or self.opaque_selection:
+            return surface
+        out = _copy_surface(surface)
+        _replace_color_alpha(out, self.color2)
+        return out
+
+    def _transparentize_floating(self):
+        sel = self.doc.selection
+        if sel and sel.floating is not None and not self.opaque_selection:
+            sel.floating = self._apply_transparent_selection(sel.floating)
+
     def get_clipboard_surface(self):
         if self.doc.selection:
             if self.doc.selection.floating is not None:
                 s = self.doc.selection.floating
                 out = cairo.ImageSurface(cairo.FORMAT_ARGB32, s.get_width(), s.get_height())
                 c = cairo.Context(out); c.set_source_surface(s, 0, 0); c.paint()
-                return out
-            return self.doc.get_selection_surface()
+                return self._apply_transparent_selection(out)
+            return self._apply_transparent_selection(self.doc.get_selection_surface())
         return None
 
     def paste_surface(self, surface, *, origin=(0, 0)):
         # Select the Selection tool first: set_tool() deliberately commits any
         # previous floating selection, so the new paste must be created after it.
         self.set_tool('select')
+        surface = self._apply_transparent_selection(surface)
         self.doc.push_undo('粘贴')
         self.doc.selection = Selection(int(origin[0]), int(origin[1]),
                                        surface.get_width(), surface.get_height(),
@@ -1057,6 +1118,7 @@ class PaintCanvas(Gtk.Overlay):
     def commit_floating(self):
         sel = self.doc.selection
         if sel and sel.floating is not None:
+            self._transparentize_floating()
             self.doc.flatten_selection()
             self.doc.dirty = True
             self._notify_modified()
@@ -1070,13 +1132,13 @@ class PaintCanvas(Gtk.Overlay):
     def cut_selection(self):
         s = self.copy_selection()
         if s is not None:
-            self.doc.delete_selection(tuple(v / 255 for v in self.color2))
+            self.doc.delete_selection(self._delete_background())
             self._notify_selection(); self._notify_modified(); self.drawing.queue_draw()
         return s
 
     def delete_selection(self):
         if self.doc.selection is not None:
-            self.doc.delete_selection(tuple(v / 255 for v in self.color2))
+            self.doc.delete_selection(self._delete_background())
             self._notify_selection(); self._notify_modified(); self.drawing.queue_draw()
             return True
         return False
